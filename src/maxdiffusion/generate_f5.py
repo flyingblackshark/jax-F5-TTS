@@ -21,6 +21,7 @@ import functools
 import math
 import time
 import jax.experimental
+import jax.experimental.compilation_cache.compilation_cache
 import jax.experimental.ode
 import jax.flatten_util
 import numpy as np
@@ -51,6 +52,8 @@ import os
 from importlib.resources import files
 import librosa
 import audax.core.functional
+import jax.experimental.compilation_cache
+jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 def run(config):
   
   rng = jax.random.key(config.seed)
@@ -199,7 +202,7 @@ def run(config):
   batch_size = 1 * num_devices
   ref_text = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
   gen_text = "Hello , I'm Aurora."
-  ref_audio, ref_sr = librosa.load("/home/fbs/maxdiffusion/test.mp3",sr=24000)
+  ref_audio, ref_sr = librosa.load("/root/MaxTTS-Diffusion/test.mp3",sr=24000)
   #max_chars = int(len(ref_text.encode("utf-8")) / (ref_audio.shape[-1] / ref_sr) * (22 - ref_audio.shape[-1] / ref_sr))
   #gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
   text_list = [ref_text + gen_text]
@@ -215,13 +218,9 @@ def run(config):
     return list_idx_tensors
   text = list_str_to_idx(final_text_list, vocab_char_map)
   cond_mel = jax.jit(get_mel)(ref_audio[np.newaxis,:])
-  #cond_mel = np.load("/home/fbs/F5-TTS/cond.npy")
-  #txt_ids = jnp.zeros(text_ids_shape, dtype=jnp.int32)
-  #text = np.load("/home/fbs/F5-TTS/text.npy")
   text = jnp.asarray(text)
   text = text + 1
-  #t = jnp.asarray((0,))
-  #mask = None
+
   rng = {'params': jax.random.PRNGKey(0), 'dropout': jax.random.PRNGKey(0)}
 
   def lens_to_mask(t: jnp.ndarray, length: int | None = None) -> jnp.ndarray:
@@ -287,8 +286,8 @@ def run(config):
   t_start = 0
   steps = 32
   t = jnp.linspace(t_start, 1.0, steps+1).astype(jnp.float32)
+
   sway_sampling_coef =  -1.0
-  y0 = jnp.zeros_like(y0)
 
   t = t + sway_sampling_coef * (jnp.cos(jnp.pi / 2 * t) - 1 + t)
   

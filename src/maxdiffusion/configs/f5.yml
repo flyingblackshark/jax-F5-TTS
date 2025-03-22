@@ -23,8 +23,8 @@ gcs_metrics: False
 save_config_to_gcs: False
 log_period: 100
 
-pretrained_model_name_or_path: '/home/fbs/F5-TTS/ckpts/model_70000.pt'
-vocab_name_or_path: '/home/fbs/F5-TTS/data/my_dataset_pinyin/vocab.txt'
+pretrained_model_name_or_path: '/root/aurora_f5_v1/model_70000.pt'
+vocab_name_or_path: '/root/aurora_f5_v1/vocab.txt'
 use_ema: True
 
 # Flux params
@@ -112,7 +112,7 @@ diffusion_scheduler_config: {
 base_output_directory: ""
 
 # Hardware
-hardware: 'gpu' # Supported hardware types are 'tpu', 'gpu'
+hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu'
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
