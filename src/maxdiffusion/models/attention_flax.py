@@ -658,7 +658,7 @@ class FlaxAttention(nn.Module):
     self.query = nn.Dense(
         inner_dim,
         kernel_init=qkv_init_kernel,
-        use_bias=False,
+        use_bias=True,
         dtype=self.dtype,
         param_dtype=self.weights_dtype,
         name="to_q",
@@ -669,7 +669,7 @@ class FlaxAttention(nn.Module):
     self.key = nn.Dense(
         inner_dim,
         kernel_init=qkv_init_kernel,
-        use_bias=False,
+        use_bias=True,
         dtype=self.dtype,
         param_dtype=self.weights_dtype,
         name="to_k",
@@ -680,7 +680,7 @@ class FlaxAttention(nn.Module):
     self.value = nn.Dense(
         inner_dim,
         kernel_init=qkv_init_kernel,
-        use_bias=False,
+        use_bias=True,
         dtype=self.dtype,
         param_dtype=self.weights_dtype,
         name="to_v",
@@ -1062,3 +1062,138 @@ class FlaxGEGLU(nn.Module):
     hidden_states = self.proj(hidden_states)
     hidden_linear, hidden_gelu = jnp.split(hidden_states, 2, axis=2)
     return self.dropout_layer(hidden_linear * nn.gelu(hidden_gelu), deterministic=deterministic)
+
+
+class FlaxF5Attention(nn.Module):
+  query_dim: int
+  heads: int = 8
+  dim_head: int = 64
+  dropout: float = 0.0
+  use_memory_efficient_attention: bool = False
+  split_head_dim: bool = False
+  attention_kernel: str = "dot_product"
+  flash_min_seq_length: int = 4096
+  flash_block_sizes: BlockSizes = None
+  mesh: jax.sharding.Mesh = None
+  dtype: jnp.dtype = jnp.float32
+  weights_dtype: jnp.dtype = jnp.float32
+  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD)
+  key_axis_names: AxisNames = (BATCH, LENGTH, HEAD)
+  value_axis_names: AxisNames = (BATCH, LENGTH, HEAD)
+  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD)
+  precision: jax.lax.Precision = None
+  qkv_bias : bool = False
+  quant: Quant = None
+
+  def setup(self):
+
+    if self.attention_kernel == "flash" and self.mesh is None:
+      raise ValueError(f"The flash attention kernel requires a value for mesh, but mesh is {self.mesh}")
+    inner_dim = self.dim_head * self.heads
+    scale = self.dim_head**-0.5
+
+    self.attention_op = AttentionOp(
+        mesh=self.mesh,
+        attention_kernel=self.attention_kernel,
+        scale=scale,
+        heads=self.heads,
+        dim_head=self.dim_head,
+        flash_min_seq_length=self.flash_min_seq_length,
+        use_memory_efficient_attention=self.use_memory_efficient_attention,
+        split_head_dim=self.split_head_dim,
+        flash_block_sizes=self.flash_block_sizes,
+        dtype=self.dtype,
+        quant=self.quant,
+    )
+
+    qkv_init_kernel = nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "heads"))
+    dot_general_cls = None
+    if self.quant:
+      dot_general_cls = self.quant.dot_general_cls()
+
+    self.query = nn.Dense(
+        inner_dim,
+        kernel_init=qkv_init_kernel,
+        use_bias=self.qkv_bias,
+        dtype=self.dtype,
+        param_dtype=self.weights_dtype,
+        name="to_q",
+        precision=self.precision,
+        dot_general_cls=dot_general_cls,
+    )
+
+    self.key = nn.Dense(
+        inner_dim,
+        kernel_init=qkv_init_kernel,
+        use_bias=self.qkv_bias,
+        dtype=self.dtype,
+        param_dtype=self.weights_dtype,
+        name="to_k",
+        precision=self.precision,
+        dot_general_cls=dot_general_cls,
+    )
+
+    self.value = nn.Dense(
+        inner_dim,
+        kernel_init=qkv_init_kernel,
+        use_bias=self.qkv_bias,
+        dtype=self.dtype,
+        param_dtype=self.weights_dtype,
+        name="to_v",
+        precision=self.precision,
+        dot_general_cls=dot_general_cls,
+    )
+
+    self.proj_attn = nn.Dense(
+        self.query_dim,
+        kernel_init=nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("heads", "embed")),
+        dtype=self.dtype,
+        param_dtype=self.weights_dtype,
+        name="to_out_0",
+        precision=self.precision,
+    )
+    self.dropout_layer = nn.Dropout(rate=self.dropout)
+  def rotate_half(self,x):
+    x = rearrange(x, '... (d r) -> ... d r', r = 2)
+    x1, x2 = jnp.split(x,indices_or_sections=2,axis = -1)
+    x = jnp.concatenate((-x2, x1), axis = -1)
+    return rearrange(x, '... d r -> ... (d r)')
+
+  def apply_rotary_pos_emb(self, t, freqs, scale = 1):
+      rot_dim, seq_len, orig_dtype = freqs.shape[-1], t.shape[-2], t.dtype
+
+      freqs = freqs[:, -seq_len:, :]
+      scale = scale[:, -seq_len:, :] if isinstance(scale, jnp.ndarray) else scale
+
+      if t.ndim == 4 and freqs.ndim == 3:
+          freqs = rearrange(freqs, 'b n d -> b 1 n d')
+
+      # partial rotary embeddings, Wang et al. GPT-J
+      t, t_unrotated = t[..., :rot_dim], t[..., rot_dim:]
+      t = (t * jnp.cos(freqs) * scale) + (self.rotate_half(t) * jnp.sin(freqs) * scale)
+      out = jnp.concatenate((t, t_unrotated), axis = -1)
+
+      return out.astype(orig_dtype)
+  
+  def __call__(self, hidden_states, context=None,rope=None,deterministic=True, cross_attention_kwargs=None):
+    context = hidden_states if context is None else context
+    query_proj = self.query(hidden_states)
+    key_proj = self.key(context)
+    value_proj = self.value(context)
+
+    if rope is not None:
+      freqs, xpos_scale = rope
+      q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+      query_proj = jnp.reshape(query_proj,(query_proj.shape[0], -1, self.heads, self.dim_head)).transpose(0,2,1,3)
+      key_proj = jnp.reshape(key_proj,(key_proj.shape[0], -1, self.heads, self.dim_head)).transpose(0,2,1,3)
+      value_proj = jnp.reshape(value_proj,(value_proj.shape[0], -1, self.heads, self.dim_head)).transpose(0,2,1,3)
+      query_proj = self.apply_rotary_pos_emb(query_proj, freqs, q_xpos_scale)
+      key_proj = self.apply_rotary_pos_emb(key_proj, freqs, k_xpos_scale)
+
+    hidden_states = self.attention_op.apply_attention(query_proj.transpose(0,2,1,3),key_proj.transpose(0,2,1,3),value_proj.transpose(0,2,1,3))
+
+    hidden_states = jnp.reshape(hidden_states,(hidden_states.shape[0], -1, self.heads * self.dim_head))
+
+    hidden_states = self.proj_attn(hidden_states)
+    hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, HEAD))
+    return self.dropout_layer(hidden_states, deterministic=deterministic)

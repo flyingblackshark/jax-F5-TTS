@@ -176,3 +176,4 @@ tags
 .ruff_cache
 
 wandb
+output.wav
