@@ -88,7 +88,7 @@ class FluxTransformerBlock(nn.Module):
         heads=self.num_attention_heads,
         dim_head=self.attention_head_dim,
         qkv_bias=self.qkv_bias,
-        split_head_dim=True,
+        split_head_dim=False,
         dtype=self.dtype,
         weights_dtype=self.weights_dtype,
         attention_kernel=self.attention_kernel,
@@ -133,13 +133,14 @@ class FluxTransformerBlock(nn.Module):
     self._chunk_size = None
     self._chunk_dim = 0
 
-  def __call__(self, x, temb, mask=None,image_rotary_emb=None):
+  def __call__(self, x, temb, decoder_segment_ids=None,image_rotary_emb=None):
     norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=temb)
 
     # Attention.
     attn_output = self.attn(
         hidden_states=norm_hidden_states,
-        rope=image_rotary_emb
+        rope=image_rotary_emb,
+        decoder_segment_ids=decoder_segment_ids
     )
 
     x = x + gate_msa * attn_output
@@ -301,7 +302,7 @@ class TextEmbedding(nn.Module):
         else:
             self.extra_modeling = False
 
-    def __call__(self, text, seq_len,text_mask, drop_text=False):  # noqa: F722
+    def __call__(self, text, seq_len,text_decoder_segment_ids, drop_text=False):  # noqa: F722
         
         batch, text_len = text.shape[0], text.shape[1]
 
@@ -319,10 +320,10 @@ class TextEmbedding(nn.Module):
             text = text + text_pos_embed
 
             # convnextv2 blocks
-            text = text * text_mask[...,jnp.newaxis]
+            text = text * text_decoder_segment_ids[...,jnp.newaxis]
             for block in self.text_blocks:
                 text = block(text)
-                text = text * text_mask[...,jnp.newaxis]
+                text = text * text_decoder_segment_ids[...,jnp.newaxis]
 
         return text
 def exists(val):
@@ -521,10 +522,10 @@ class F5Transformer2DModel(nn.Module):
       self,
       x, #noised input audio
       cond, #masked cond audio
-      text, #text
+      txt_ids, #text
       timestep, #time step
-      mask, #mask
-      text_mask,
+      decoder_segment_ids, #mask
+      text_decoder_segment_ids,
       drop_text:bool = False,
       drop_audio_cond:bool = False,
       train: bool = False,
@@ -533,8 +534,8 @@ class F5Transformer2DModel(nn.Module):
     
     t = self.time_embed(timestep)
     if drop_text:  # cfg for text
-        text = jnp.zeros_like(text)
-    text_embed = self.text_embed(text, seq_len,text_mask=text_mask, drop_text=self.drop_text)
+        txt_ids = jnp.zeros_like(txt_ids)
+    text_embed = self.text_embed(txt_ids, seq_len,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
     #text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
     x = self.input_embed(x,cond,text_embed,drop_audio_cond=drop_audio_cond)
     image_rotary_emb = self.rotary_embed.forward_from_seq_len(seq_len)
@@ -545,7 +546,7 @@ class F5Transformer2DModel(nn.Module):
           x=x,
           temb=t,
           image_rotary_emb=image_rotary_emb,
-          mask=mask,
+          decoder_segment_ids=decoder_segment_ids,
       )
 
     x = self.norm_out(x, t)
@@ -561,8 +562,12 @@ class F5Transformer2DModel(nn.Module):
     batch_size = 1 * num_devices
     batch_image_shape = (
         batch_size,
-        512,
+        max_sequence_length,
         100
+    )
+    decoder_segment_ids = (
+        batch_size,
+        max_sequence_length
     )
     # bs, encoder_input, seq_length
     text_ids_shape = (
@@ -570,31 +575,36 @@ class F5Transformer2DModel(nn.Module):
         max_sequence_length,
     )
 
+    text_decoder_segment_ids = (
+        batch_size,
+        max_sequence_length,
+    )
+
     img = jnp.zeros(batch_image_shape, dtype=self.dtype)
 
     txt_ids = jnp.zeros(text_ids_shape, dtype=jnp.int32)
-    text_mask = txt_ids != 0
+    decoder_segment_ids = jnp.zeros(decoder_segment_ids, dtype=jnp.int32)
+    text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids,dtype=jnp.int32)
     t = jnp.asarray((0,))
     mask = None
-    # if eval_only:
-    #   return jax.eval_shape(
-    #       self.init,
-    #       rngs,
-    #       hidden_states=img,
-    #       img_ids=img_ids,
-    #       encoder_hidden_states=txt,
-    #       txt_ids=txt_ids,
-    #       pooled_projections=vec,
-    #       timestep=t_vec,
-    #       guidance=guidance_vec,
-    #   )["params"]
-    # else:
-    return self.init(
-        rngs,
-        x=img,
-        cond=img,
-        text=txt_ids,
-        timestep=t,
-        mask=mask,
-        text_mask=text_mask,
-    )["params"]
+    if eval_only:
+      return jax.eval_shape(
+          self.init,
+            rngs,
+            x=img,
+            cond=img,
+            txt_ids=txt_ids,
+            timestep=t,
+            decoder_segment_ids=decoder_segment_ids,
+            text_decoder_segment_ids=text_decoder_segment_ids,
+      )["params"]
+    else:
+        return self.init(
+            rngs,
+            x=img,
+            cond=img,
+            txt_ids=txt_ids,
+            timestep=t,
+            decoder_segment_ids=decoder_segment_ids,
+            text_decoder_segment_ids=text_decoder_segment_ids,
+        )["params"]
