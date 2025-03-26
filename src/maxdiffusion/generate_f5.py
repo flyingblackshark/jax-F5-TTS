@@ -54,7 +54,7 @@ import librosa
 import audax.core.functional
 import jax.experimental.compilation_cache
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
-
+cfg_strength = 2
 def loop_body(
     step,
     args,
@@ -64,23 +64,36 @@ def loop_body(
     decoder_segment_ids,
     text_decoder_segment_ids,
 ):
-  latents, state, c_ts, p_ts = args
-  latents_dtype = latents.dtype
-  t_curr = c_ts[step]
-  t_prev = p_ts[step]
-  t_vec = jnp.full((latents.shape[0],), t_curr, dtype=latents.dtype)
-  pred = transformer.apply(
-      {"params": state.params},
-      x=latents,
-      cond=cond,
-      decoder_segment_ids=decoder_segment_ids,
-      text_decoder_segment_ids=text_decoder_segment_ids,
-      txt_ids=txt_ids,
-      timestep=t_vec,
-  )#.sample
-  latents = latents + (t_prev - t_curr) * pred
-  latents = jnp.array(latents, dtype=latents_dtype)
-  return latents, state, c_ts, p_ts
+    latents, state, c_ts, p_ts = args
+    latents_dtype = latents.dtype
+    t_curr = c_ts[step]
+    t_prev = p_ts[step]
+    t_vec = jnp.full((latents.shape[0],), t_curr, dtype=latents.dtype)
+    pred = transformer.apply(
+        {"params": state.params},
+        x=latents,
+        cond=cond,
+        decoder_segment_ids=decoder_segment_ids,
+        text_decoder_segment_ids=text_decoder_segment_ids,
+        txt_ids=txt_ids,
+        timestep=t_vec,
+    )
+    null_pred = transformer.apply(
+        {"params": state.params},
+        x=latents,
+        cond=cond,
+        decoder_segment_ids=decoder_segment_ids,
+        text_decoder_segment_ids=text_decoder_segment_ids,
+        txt_ids=txt_ids,
+        timestep=t_vec,
+        drop_text=True,
+        drop_audio_cond=True,
+    )
+    pred = pred + (pred - null_pred) * cfg_strength
+
+    latents = latents + (t_prev - t_curr) * pred
+    latents = jnp.array(latents, dtype=latents_dtype)
+    return latents, state, c_ts, p_ts
 
 def run_inference(
     states, transformer, config, mesh, latents, cond, decoder_segment_ids, text_decoder_segment_ids, txt_ids, c_ts, p_ts
@@ -144,9 +157,9 @@ def run(config):
 
     def get_mel(y, n_mels=100,n_fft=1024,win_size=1024,hop_length=256,fmin=0,fmax=None,clip_val=1e-7,sampling_rate=24000):
 
-        pad_left = (win_size - hop_length) //2
-        pad_right = max((win_size - hop_length + 1) //2, win_size - y.shape[-1] - pad_left)
-        y = jnp.pad(y, ((0,0),(pad_left, pad_right)))
+        #pad_left = (win_size - hop_length) //2
+        #pad_right = max((win_size - hop_length + 1) //2, win_size - y.shape[-1] - pad_left)
+        #y = jnp.pad(y, ((0,0),(pad_left, pad_right)))
         window = jnp.hanning(win_size)
         spec_func = functools.partial(audax.core.functional.spectrogram, pad=0, window=window, n_fft=n_fft,
                         hop_length=hop_length, win_length=win_size, power=1.,
@@ -265,7 +278,7 @@ def run(config):
     num_devices = len(jax.devices())
     batch_size = 1 * num_devices
     ref_text = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
-    gen_text = "Hello , I'm Aurora."
+    gen_text = "Hello , I'm Aurora.And nice to meet you."
     ref_audio, ref_sr = librosa.load("/root/MaxTTS-Diffusion/test.mp3",sr=24000)
     #max_chars = int(len(ref_text.encode("utf-8")) / (ref_audio.shape[-1] / ref_sr) * (22 - ref_audio.shape[-1] / ref_sr))
     #gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
@@ -281,7 +294,7 @@ def run(config):
         #text = pad_sequence(list_idx_tensors, padding_value=padding_value, batch_first=True)
         return list_idx_tensors
     text_ids = list_str_to_idx(final_text_list, vocab_char_map)
-    cond_mel = jax.jit(get_mel)(ref_audio[np.newaxis,:])
+    cond = jax.jit(get_mel)(ref_audio[np.newaxis,:])
     text_ids = jnp.asarray(text_ids)
     text_ids = text_ids + 1
 
@@ -298,19 +311,19 @@ def run(config):
         mask = seq < t[:, None]  # 形状: (b, n)
         
         return mask
-    local_speed = 1
-    ref_audio_len = ref_audio.shape[-1] // 256
-    max_duration = 4096
+    local_speed = 0.5
+    ref_audio_len = ref_audio.shape[-1] // 256 + 1
+    max_duration = 2048
     ref_text_len = len(ref_text.encode("utf-8"))
     gen_text_len = len(gen_text.encode("utf-8"))
     duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
 
-    lens = jnp.full((batch_size,), cond_mel.shape[1])
+    lens = jnp.full((batch_size,), cond.shape[1])
 
     duration = jnp.maximum(
             jnp.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
     ) 
-    ref_len = cond_mel.shape[1]
+    ref_len = cond.shape[1]
 
     cond_mask = lens_to_mask(lens)
     mask = lens_to_mask(duration)
@@ -322,10 +335,13 @@ def run(config):
     decoder_segment_ids = mask.astype(jnp.int32)
     
     
-    cond_mel = jnp.pad(cond_mel, ((0,batch_size-cond_mel.shape[0]),(0, max_duration - cond_mel.shape[1]),(0,0)))
+    cond = jnp.pad(cond, ((0,batch_size-cond.shape[0]),(0, max_duration - cond.shape[1]),(0,0)))
+    step_cond = jnp.where(
+        cond_mask[...,jnp.newaxis], cond, jnp.zeros_like(cond)
+    ) 
 
     
-    cfg_strength = 2
+    
     # def ode_rhs(z, t):
     #     pred = model.apply({"params":params},
     #     x=z,
@@ -377,7 +393,7 @@ def run(config):
         config=config,
         mesh=mesh,
         latents=latents,
-        cond=cond_mel,
+        cond=step_cond,
         text_decoder_segment_ids=text_decoder_segment_ids,
         decoder_segment_ids=decoder_segment_ids,
         txt_ids=text_ids,
@@ -395,12 +411,12 @@ def run(config):
     #y_final = jax.lax.fori_loop(0, steps, body, y0)
 
     out = y_final
-    out = jnp.where(cond_mask[...,jnp.newaxis], cond_mel, out)
+    out = jnp.where(cond_mask[...,jnp.newaxis], cond, out)
     out = out[:1]
     from jax_vocos import load_model
     vocos_model,vocos_params = load_model()
     rng = {'params': jax.random.PRNGKey(0), 'dropout': jax.random.PRNGKey(0)}
-    res = jax.jit(vocos_model.apply)({"params":vocos_params},out[:,ref_len:ref_len+duration[0]],rngs=rng)
+    res = jax.jit(vocos_model.apply)({"params":vocos_params},out[:,ref_len:duration[0]],rngs=rng)
     import soundfile as sf
     sf.write("output.wav",res[0],samplerate=24000)
 

@@ -43,7 +43,8 @@ Quant = quantizations.AqtQuantization
 
 
 Quant = quantizations.AqtQuantization
-
+import numpy as np
+DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
 def _maybe_aqt_einsum(quant: Quant):
   return jnp.einsum if quant is None else quant.einsum()
@@ -228,47 +229,23 @@ class AttentionOp(nn.Module):
       query_states = query_states.astype(jnp.float32)
       key_states = key_states.astype(jnp.float32)
 
-    # if self.use_memory_efficient_attention:
-    #   query_states = query_states.transpose(1, 0, 2)
-    #   key_states = key_states.transpose(1, 0, 2)
-    #   value_states = value_states.transpose(1, 0, 2)
-
-    #   # this if statement create a chunk size for each layer of the unet
-    #   # the chunk size is equal to the query_length dimension of the deepest layer of the unet
-
-    #   flatten_latent_dim = query_states.shape[-3]
-    #   if flatten_latent_dim % 64 == 0:
-    #     query_chunk_size = int(flatten_latent_dim / 64)
-    #   elif flatten_latent_dim % 16 == 0:
-    #     query_chunk_size = int(flatten_latent_dim / 16)
-    #   elif flatten_latent_dim % 4 == 0:
-    #     query_chunk_size = int(flatten_latent_dim / 4)
-    #   else:
-    #     query_chunk_size = int(flatten_latent_dim)
-
-    #   hidden_states = jax_memory_efficient_attention(
-    #       query_states, key_states, value_states, query_chunk_size=query_chunk_size, key_chunk_size=4096 * 4
-    #   )
-
-    #   hidden_states = hidden_states.transpose(1, 0, 2)
-    # else:
     if self.split_head_dim:
       attention_scores = jnp.einsum("b t n h, b f n h -> b n f t", key_states, query_states)
     else:
       attention_scores = jnp.einsum("b i d, b j d->b i j", query_states, key_states)
 
-    if decoder_segment_ids is not None:
-      # Assume decoder_segment_ids has shape (b, seq_length)
-      # Create a mask where positions having the same segment ID are True.
-      mask = jnp.equal(decoder_segment_ids[:, None, :], decoder_segment_ids[:, :, None])
-      if self.split_head_dim:
-          # attention_scores shape is (b, heads, key_length, query_length)
-          # Expand mask to shape (b, 1, key_length, query_length)
-          mask = mask[:, None, :, :]
-      # Replace False positions with a large negative value.
-      attention_scores = jnp.where(mask, attention_scores, -1e9)
-
     attention_scores = attention_scores * self.scale
+
+    if decoder_segment_ids is not None:
+        # 假设 seq_len_query == seq_len_key == seq_len
+        mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]  # (batch_size, seq_len, seq_len)
+        if self.split_head_dim:
+            mask = mask[:, None, :, :]  # (batch_size, 1, seq_len, seq_len)
+        else:
+            mask = jnp.repeat(mask, self.heads, axis=0)  # (batch_size * heads, seq_len, seq_len)
+        attention_scores = jnp.where(mask, attention_scores, -1e9)
+
+        
     attention_probs = nn.softmax(attention_scores, axis=-1 if self.split_head_dim else 2)
 
     attention_probs = attention_probs.astype(self.dtype)
