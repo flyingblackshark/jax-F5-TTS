@@ -242,11 +242,14 @@ class ConvNeXtV2Block(nn.Module):
     
 
 
-def get_pos_embed_indices(start, length, max_pos, scale=1.0):
+def get_pos_embed_indices(start, 
+                          #length, 
+                          max_pos, 
+                          scale=1.0):
     # Create a scale tensor of the same shape as start.
     scale = scale * jnp.ones_like(start, dtype=jnp.float32)
     # Compute positions: add an unsqueezed start to the broadcasted arange scaled appropriately.
-    pos = start[:, None] + (jnp.arange(length, dtype=jnp.float32)[None, :] * scale[:, None]).astype(jnp.int32)
+    pos = start[:, None] + (jnp.arange(max_pos, dtype=jnp.float32)[None, :] * scale[:, None]).astype(jnp.int32)
     # Ensure positions are less than max_pos; otherwise, use max_pos - 1.
     pos = jnp.where(pos < max_pos, pos, max_pos - 1)
     return pos.astype(jnp.int32)
@@ -273,7 +276,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, theta_resca
     # Concatenate the cosine and sine parts along the last dimension.
     return jnp.concatenate([freqs_cos, freqs_sin], axis=-1)
 
-class TextEmbedding(nn.Module):
+class F5TextEmbedding(nn.Module):
     text_num_embeds:int
     text_dim:int
     conv_layers:int=0
@@ -291,12 +294,15 @@ class TextEmbedding(nn.Module):
         else:
             self.extra_modeling = False
 
-    def __call__(self, text, seq_len,decoder_segment_ids,text_decoder_segment_ids, drop_text=False):  # noqa: F722
+    def __call__(self, 
+                 text, 
+                 #seq_len,
+                 text_decoder_segment_ids):#, drop_text=False):  # noqa: F722
         
         batch, text_len = text.shape[0], text.shape[1]
 
-        if drop_text:  # cfg for text
-            text = jnp.zeros_like(text)
+        # if drop_text:  # cfg for text
+        #     text = jnp.zeros_like(text)
 
         text = self.text_embed(text)  # b n -> b n d
 
@@ -304,7 +310,9 @@ class TextEmbedding(nn.Module):
         if self.extra_modeling:
             # sinus pos emb
             batch_start = jnp.zeros((batch,))
-            pos_idx = get_pos_embed_indices(batch_start, seq_len, max_pos=self.precompute_max_pos) * decoder_segment_ids
+            pos_idx = get_pos_embed_indices(batch_start, 
+                                            #seq_len, 
+                                            max_pos=self.precompute_max_pos)
             text_pos_embed = self.freqs_cis[pos_idx]
             text = text + text_pos_embed
 
@@ -315,6 +323,43 @@ class TextEmbedding(nn.Module):
                 text = text * text_decoder_segment_ids[...,jnp.newaxis]
 
         return text
+    def init_weights(self, rngs, max_sequence_length, eval_only=True):
+        num_devices = len(jax.devices())
+        batch_size = 1 * num_devices
+        decoder_segment_ids_shape = (
+            batch_size,
+            max_sequence_length
+        )
+        # bs, encoder_input, seq_length
+        txt_ids_shape = (
+            batch_size,
+            max_sequence_length
+        )
+
+        text_decoder_segment_ids_shape = (
+            batch_size,
+            max_sequence_length,
+        )
+        text_ids = jnp.zeros(txt_ids_shape, dtype=jnp.int32)
+        decoder_segment_ids = jnp.zeros(decoder_segment_ids_shape, dtype=jnp.int32)
+        text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids_shape,dtype=jnp.int32)
+        if eval_only:
+            return jax.eval_shape(
+                self.init,
+                    rngs,
+                    text=text_ids,
+                    seq_len=max_sequence_length,
+                    decoder_segment_ids=decoder_segment_ids,
+                    text_decoder_segment_ids=text_decoder_segment_ids,
+            )["params"]
+        else:
+            return self.init(
+                rngs,
+                text=text_ids,
+                seq_len=max_sequence_length,
+                decoder_segment_ids=decoder_segment_ids,
+                text_decoder_segment_ids=text_decoder_segment_ids,
+            )["params"]
 def exists(val):
     return val is not None
 
@@ -436,11 +481,9 @@ class F5Transformer2DModel(nn.Module):
   heads:int = 16
 
   def setup(self):
-    #self.out_channels = self.in_channels
-    #self.inner_dim = self.num_attention_heads * self.attention_head_dim
     self.time_embed = TimestepEmbedding(self.dim)
     self.input_embed = InputEmbedding(self.mel_dim,self.text_dim,self.dim)
-    self.text_embed = TextEmbedding(self.text_num_embeds, self.text_dim, conv_layers=self.conv_layers)
+    #self.text_embed = TextEmbedding(self.text_num_embeds, self.text_dim, conv_layers=self.conv_layers)
     self.rotary_embed = RotaryEmbedding(self.dim_head)
 
     blocks = []
@@ -485,21 +528,21 @@ class F5Transformer2DModel(nn.Module):
       self,
       x, #noised input audio
       cond, #masked cond audio
-      txt_ids, #text
+      text_embed, #text
       timestep, #time step
       decoder_segment_ids, #mask
-      text_decoder_segment_ids,#text mask
-      drop_text:bool = False,
+      #text_decoder_segment_ids,#text mask
+      #drop_text:bool = False,
       drop_audio_cond:bool = False,
       train: bool = False,
   ):
     batch, seq_len = x.shape[0], x.shape[1]
     
     t = self.time_embed(timestep)
-    if drop_text:  # cfg for text
-        txt_ids = jnp.zeros_like(txt_ids)
-    text_embed = self.text_embed(txt_ids, seq_len,decoder_segment_ids=decoder_segment_ids,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
-    text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
+    #if drop_text:  # cfg for text
+    #    txt_ids = jnp.zeros_like(txt_ids)
+    #text_embed = self.text_embed(txt_ids, seq_len,decoder_segment_ids=decoder_segment_ids,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
+    #text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
     x = self.input_embed(x,cond,text_embed,decoder_segment_ids=decoder_segment_ids,drop_audio_cond=drop_audio_cond) * decoder_segment_ids[...,jnp.newaxis]
     image_rotary_emb = self.rotary_embed.forward_from_seq_len(seq_len)
     #image_rotary_emb = nn.with_logical_constraint(image_rotary_emb, ("activation_batch", "activation_embed"))
@@ -529,20 +572,15 @@ class F5Transformer2DModel(nn.Module):
         max_sequence_length
     )
     # bs, encoder_input, seq_length
-    text_ids_shape = (
+    text_embed_shape = (
         batch_size,
         max_sequence_length,
-    )
-
-    text_decoder_segment_ids_shape = (
-        batch_size,
-        max_sequence_length,
+        512
     )
 
     img = jnp.zeros(batch_image_shape, dtype=self.dtype)
-    txt_ids = jnp.zeros(text_ids_shape, dtype=jnp.int32)
+    text_embed = jnp.zeros(text_embed_shape, dtype=jnp.int32)
     decoder_segment_ids = jnp.zeros(decoder_segment_ids_shape, dtype=jnp.int32)
-    text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids_shape,dtype=jnp.int32)
     t = jnp.asarray((0,))
     if eval_only:
       return jax.eval_shape(
@@ -550,18 +588,16 @@ class F5Transformer2DModel(nn.Module):
             rngs,
             x=img,
             cond=img,
-            txt_ids=txt_ids,
+            text_embed=text_embed,
             timestep=t,
             decoder_segment_ids=decoder_segment_ids,
-            text_decoder_segment_ids=text_decoder_segment_ids,
       )["params"]
     else:
         return self.init(
             rngs,
             x=img,
             cond=img,
-            txt_ids=txt_ids,
+            text_embed=text_embed,
             timestep=t,
             decoder_segment_ids=decoder_segment_ids,
-            text_decoder_segment_ids=text_decoder_segment_ids,
         )["params"]

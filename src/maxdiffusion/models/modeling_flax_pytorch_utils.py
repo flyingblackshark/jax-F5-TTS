@@ -338,6 +338,7 @@ def convert_f5_state_dict_to_flax(path,use_ema=True):
     }
   state_dict = state_dict["model_state_dict"]
   params = {}
+  text_encoder_params = {}
 
   params[f"time_embed.linear1.kernel"] = state_dict[f"transformer.time_embed.time_mlp.0.weight"].T
   params[f"time_embed.linear1.bias"] = state_dict[f"transformer.time_embed.time_mlp.0.bias"]
@@ -345,18 +346,18 @@ def convert_f5_state_dict_to_flax(path,use_ema=True):
   params[f"time_embed.linear2.bias"] = state_dict[f"transformer.time_embed.time_mlp.2.bias"]
 
 
-  params["text_embed.text_embed.embedding"] = state_dict["transformer.text_embed.text_embed.weight"]
+  text_encoder_params["text_embed.embedding"] = state_dict["transformer.text_embed.text_embed.weight"]
   for i in range(4):
-    params[f"text_embed.text_blocks_{i}.Conv_0.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.dwconv.weight"].transpose(0,2)
-    params[f"text_embed.text_blocks_{i}.Conv_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.dwconv.bias"]
-    params[f"text_embed.text_blocks_{i}.GRN_0.gamma"] = state_dict[f"transformer.text_embed.text_blocks.{i}.grn.gamma"]
-    params[f"text_embed.text_blocks_{i}.GRN_0.beta"] = state_dict[f"transformer.text_embed.text_blocks.{i}.grn.beta"]
-    params[f"text_embed.text_blocks_{i}.LayerNorm_0.scale"] = state_dict[f"transformer.text_embed.text_blocks.{i}.norm.weight"].T
-    params[f"text_embed.text_blocks_{i}.LayerNorm_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.norm.bias"]
-    params[f"text_embed.text_blocks_{i}.Dense_0.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv1.weight"].T
-    params[f"text_embed.text_blocks_{i}.Dense_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv1.bias"]
-    params[f"text_embed.text_blocks_{i}.Dense_1.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv2.weight"].T
-    params[f"text_embed.text_blocks_{i}.Dense_1.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv2.bias"]
+    text_encoder_params[f"text_blocks_{i}.Conv_0.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.dwconv.weight"].transpose(0,2)
+    text_encoder_params[f"text_blocks_{i}.Conv_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.dwconv.bias"]
+    text_encoder_params[f"text_blocks_{i}.GRN_0.gamma"] = state_dict[f"transformer.text_embed.text_blocks.{i}.grn.gamma"]
+    text_encoder_params[f"text_blocks_{i}.GRN_0.beta"] = state_dict[f"transformer.text_embed.text_blocks.{i}.grn.beta"]
+    text_encoder_params[f"text_blocks_{i}.LayerNorm_0.scale"] = state_dict[f"transformer.text_embed.text_blocks.{i}.norm.weight"].T
+    text_encoder_params[f"text_blocks_{i}.LayerNorm_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.norm.bias"]
+    text_encoder_params[f"text_blocks_{i}.Dense_0.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv1.weight"].T
+    text_encoder_params[f"text_blocks_{i}.Dense_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv1.bias"]
+    text_encoder_params[f"text_blocks_{i}.Dense_1.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv2.weight"].T
+    text_encoder_params[f"text_blocks_{i}.Dense_1.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv2.bias"]
 
 
 
@@ -393,5 +394,7 @@ def convert_f5_state_dict_to_flax(path,use_ema=True):
   params[f"norm_out.Dense_0.bias"] = state_dict[f"transformer.norm_out.linear.bias"]
   params = {k: v.cpu().numpy() for k, v in params.items()}
   params = unflatten_dict(params, sep=".")
+  text_encoder_params = {k: v.cpu().numpy() for k, v in text_encoder_params.items()}
+  text_encoder_params = unflatten_dict(text_encoder_params, sep=".")
 
-  return params
+  return params,text_encoder_params

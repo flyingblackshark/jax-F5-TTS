@@ -21,9 +21,7 @@ import functools
 import jax.experimental
 import jax.experimental.compilation_cache.compilation_cache
 import jax.experimental.ode
-import jax.flatten_util
 import numpy as np
-from PIL import Image
 import jax
 from jax.sharding import Mesh, PositionalSharding, PartitionSpec as P
 import jax.numpy as jnp
@@ -36,7 +34,7 @@ import re
 from pypinyin import lazy_pinyin, Style
 import jieba
 from maxdiffusion import pyconfig, max_logging
-from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5Transformer2DModel
+from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5TextEmbedding, F5Transformer2DModel
 from maxdiffusion.max_utils import (
     device_put_replicated,
     get_memory_allocations,
@@ -58,10 +56,9 @@ def loop_body(
     args,
     transformer,
     cond,
-    txt_ids,
     decoder_segment_ids,
-    text_decoder_segment_ids,
-    duration,
+    text_embed_cond,
+    text_embed_uncond,
 ):
     latents,state, c_ts, p_ts = args
     latents_dtype = latents.dtype
@@ -73,8 +70,7 @@ def loop_body(
         x=latents,
         cond=cond,
         decoder_segment_ids=decoder_segment_ids,
-        text_decoder_segment_ids=text_decoder_segment_ids,
-        txt_ids=txt_ids,
+        text_embed=text_embed_cond,
         timestep=t_vec,
     )
     null_pred = transformer.apply(
@@ -82,10 +78,8 @@ def loop_body(
         x=latents,
         cond=cond,
         decoder_segment_ids=decoder_segment_ids,
-        text_decoder_segment_ids=text_decoder_segment_ids,
-        txt_ids=txt_ids,
+        text_embed=text_embed_uncond,
         timestep=t_vec,
-        drop_text=True,
         drop_audio_cond=True,
     )
     pred = pred + (pred - null_pred) * cfg_strength
@@ -94,7 +88,7 @@ def loop_body(
     return latents, state, c_ts, p_ts
 
 def run_inference(
-    states, transformer, config, mesh, latents, cond, decoder_segment_ids,text_decoder_segment_ids, txt_ids,duration, c_ts, p_ts
+    states, transformer, config, mesh, latents, cond, decoder_segment_ids,text_embed_cond,text_embed_uncond, c_ts, p_ts
 ):
 
   transformer_state = states
@@ -104,10 +98,9 @@ def run_inference(
       loop_body,
       transformer=transformer,
       cond=cond,
-      txt_ids=txt_ids,
       decoder_segment_ids=decoder_segment_ids,
-      text_decoder_segment_ids=text_decoder_segment_ids,
-      duration=duration,
+      text_embed_cond=text_embed_cond,
+      text_embed_uncond=text_embed_uncond,
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -136,7 +129,7 @@ def run(config):
         weights_dtype=config.weights_dtype,
         precision=get_precision(config),
     )
-    transformer_params = convert_f5_state_dict_to_flax(config.pretrained_model_name_or_path,use_ema=config.use_ema)
+    transformer_params,text_encoder_params = convert_f5_state_dict_to_flax(config.pretrained_model_name_or_path,use_ema=config.use_ema)
     weights_init_fn = functools.partial(transformer.init_weights, rngs=rng, max_sequence_length=config.max_sequence_length, eval_only=False)
     transformer_state, transformer_state_shardings = setup_initial_state(
         model=transformer,
@@ -278,32 +271,51 @@ def run(config):
     ref_text = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
     if len(ref_text[-1].encode("utf-8")) == 1:
         ref_text = ref_text + " "
-    gen_text = "Hello,I'm Aurora.And nice to meet you.This is a very long sentence intended to test the stability of the model.I really like this model and so I use it a lot."
+    #gen_text = "Hello,I'm Aurora.And nice to meet you.This is a very long sentence intended to test the stability of the model.I really like this model and so I use it a lot."
+    gen_text = "The sun was setting behind the mountains, casting a golden glow over the quiet village as a gentle breeze rustled the leaves, carrying the distant laughter of children playing near the river while an old man sat on his porch, sipping tea and watching the world slow down, his mind drifting to memories of his youth, the days when he, too, ran through the fields with boundless energy, never imagining that one day he would sit here, content yet wistful, as the cycle of life continued around him, unchanging and eternal."
     ref_audio, ref_sr = librosa.load("/root/MaxTTS-Diffusion/test.mp3",sr=24000)
-    #max_chars = int(len(ref_text.encode("utf-8")) / (ref_audio.shape[-1] / ref_sr) * (22 - ref_audio.shape[-1] / ref_sr))
-    #gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
-    text_list = [ref_text + gen_text]
-    final_text_list = convert_char_to_pinyin(text_list)
+    max_chars = int(len(ref_text.encode("utf-8")) / (ref_audio.shape[-1] / ref_sr) * (22 - ref_audio.shape[-1] / ref_sr))
     vocab_char_map, vocab_size = get_tokenizer(config.vocab_name_or_path, "custom")
+    gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
+    batched_text_list = []
+    batched_duration = []
+    ref_max_length = max_duration * 256 
+    ref_audio_len = ref_audio.shape[-1] // 256 + 1
+    for single_gen_text in gen_text_batches:
+        text_list = ref_text + single_gen_text
+        ref_text_len = len(ref_text.encode("utf-8"))
+        gen_text_len = len(single_gen_text.encode("utf-8"))
+        duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
+        batched_duration.append(duration)
+        batched_text_list.append(text_list)
+    final_text_list = convert_char_to_pinyin(batched_text_list)
+    
     def list_str_to_idx(
         text: list[str] | list[list[str]],
         vocab_char_map: dict[str, int],  # {char: idx}
         #padding_value=-1,
     ):  # noqa: F722
-        list_idx_tensors = [[vocab_char_map.get(c, 0) for c in t] for t in text]  # pinyin or char style
-        #text = pad_sequence(list_idx_tensors, padding_value=padding_value, batch_first=True)
-        return list_idx_tensors
+        outs = []
+        for t in text:
+            list_idx_tensors = [vocab_char_map.get(c, 0) for c in t]  # pinyin or char style
+            text_ids = jnp.asarray(list_idx_tensors)
+            #text = pad_sequence(list_idx_tensors, padding_value=padding_value, batch_first=True)
+            text_ids = text_ids + 1
+            text_ids = jnp.pad(text_ids, ((0, max_duration - text_ids.shape[-1])))
+            outs.append(text_ids)
+        stacked_text_idss = jnp.stack(outs)
+        return stacked_text_idss
     text_ids = list_str_to_idx(final_text_list, vocab_char_map)
-    
-    ref_max_length = max_duration * 256 
-    ref_audio_len = ref_audio.shape[-1] // 256 + 1
-    ref_audio = np.pad(ref_audio,(0,ref_max_length - 256 - ref_audio.shape[0]))
+    padded_batch_size = batch_size - text_ids.shape[0]
+    text_ids = jnp.pad(text_ids, ((0,padded_batch_size),(0,0)))
+
+    ref_audio = jnp.pad(ref_audio,(0,ref_max_length - 256 - ref_audio.shape[0]))
     
     ref_audio = jax.device_put(ref_audio[np.newaxis,:],jax.sharding.NamedSharding(mesh, P(None, "data")))
     
 
-    text_ids = jnp.asarray(text_ids)
-    text_ids = text_ids + 1
+    
+    
 
     rng = {'params': jax.random.PRNGKey(0), 'dropout': jax.random.PRNGKey(0)}
 
@@ -319,38 +331,31 @@ def run(config):
         
         return mask
     
-    ref_text_len = len(ref_text.encode("utf-8"))
-    gen_text_len = len(gen_text.encode("utf-8"))
-    duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
 
     lens = jnp.full((batch_size,), ref_audio_len)
-    
-    duration = np.maximum(
-            np.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
-    ) 
-    duration = (duration // 256) * 256 + 256
-    cond_mask = lens_to_mask(lens)
-    mask = lens_to_mask(duration)
+    duration = jnp.asarray(batched_duration)
+    duration = jnp.pad(duration,(0,padded_batch_size))
+    duration = jnp.maximum(jnp.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration) 
+
+    cond_mask = lens_to_mask(lens,length=config.max_sequence_length)
+    mask = lens_to_mask(duration,length=config.max_sequence_length)
+
     cond = jax.jit(get_mel,out_shardings=None)(ref_audio)
-
-
-    
     cond_mask = jnp.pad(cond_mask, ((0,batch_size-cond_mask.shape[0]),(0, max_duration - cond_mask.shape[-1])), constant_values=False)
     mask = jnp.pad(mask, ((0,batch_size-mask.shape[0]),(0, max_duration - mask.shape[-1])), constant_values=False)
-    text_ids = jnp.pad(text_ids, ((0,batch_size-text_ids.shape[0]),(0, max_duration - text_ids.shape[-1])))
+    
     text_decoder_segment_ids = (text_ids != 0).astype(jnp.int32)
     decoder_segment_ids = mask.astype(jnp.int32)
-    
-    
-    #cond = jnp.pad(cond, ((0,batch_size-cond.shape[0]),(0, duration - cond.shape[1]),(0,0)))
+
+    text_encoder = F5TextEmbedding(text_num_embeds=2545,text_dim=512,conv_layers=4)
+    jitted_text_encode = jax.jit(text_encoder.apply,out_shardings=None)
+
     step_cond = jnp.where(
         cond_mask[...,jnp.newaxis], cond, jnp.zeros_like(cond)
     ) 
 
-    
-    
+     
     latents = jax.random.normal(jax.random.PRNGKey(0), (batch_size,max_duration,100))
-    #latents = jnp.pad(latents,((0,0),(0,max_duration-duration[0]),(0,0)))
     latents = jax.device_put(latents, data_sharding)
     step_cond = jax.device_put(step_cond, data_sharding)
     text_ids = jax.device_put(text_ids, data_sharding)
@@ -361,6 +366,19 @@ def run(config):
     c_ts = timesteps[:-1]
     p_ts = timesteps[1:]
 
+    text_embed_cond = jitted_text_encode({"params":text_encoder_params},
+                                    text=text_ids,
+                                    #seq_len=config.max_sequence_length,
+                                    #decoder_segment_ids=decoder_segment_ids,
+                                    text_decoder_segment_ids=text_decoder_segment_ids,
+                                    rngs=rng)
+    text_embed_uncond = jitted_text_encode({"params":text_encoder_params},
+                                text=jnp.zeros_like(text_ids),
+                                #seq_len=config.max_sequence_length,
+                                #decoder_segment_ids=decoder_segment_ids,
+                                text_decoder_segment_ids=text_decoder_segment_ids,
+                                rngs=rng)
+    
     p_run_inference = jax.jit(
     functools.partial(
         run_inference,
@@ -370,9 +388,8 @@ def run(config):
         latents=latents,
         cond=step_cond,
         decoder_segment_ids=decoder_segment_ids,
-        text_decoder_segment_ids=text_decoder_segment_ids,
-        txt_ids=text_ids,
-        duration=duration,
+        text_embed_cond=text_embed_cond,
+        text_embed_uncond=text_embed_uncond,
         c_ts=c_ts,
         p_ts=p_ts,
     ),
@@ -383,17 +400,19 @@ def run(config):
     y_final = p_run_inference(transformer_state)
     out = y_final
     out = jnp.where(cond_mask[...,jnp.newaxis], cond, out)
-    #out = out[:1]
     from jax_vocos import load_model
     vocos_model,vocos_params = load_model()
     rng = {'params': jax.random.PRNGKey(0), 'dropout': jax.random.PRNGKey(0)}
 
     out = jax.device_put(out, data_sharding)
     res = jax.jit(vocos_model.apply,out_shardings=None)({"params":vocos_params},out,rngs=rng)
+    res = np.asarray(res)
     
     import soundfile as sf
-    #os.remove("output.wav")
-    sf.write("output.wav",res[0][ref_audio_len*256:duration[0]*256],samplerate=24000)
+    output_segment = res[0][ref_audio_len*256:duration[0]*256]
+    for i in range(batch_size - padded_batch_size):
+        output_segment = np.concatenate((output_segment,res[i+1][ref_audio_len*256:duration[i+1]*256]))
+    sf.write("output.wav",output_segment,samplerate=24000)
 
     return None
 
