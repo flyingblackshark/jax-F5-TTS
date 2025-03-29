@@ -43,6 +43,7 @@ from maxdiffusion.max_utils import (
     get_precision,
     setup_initial_state,
 )
+import time
 from maxdiffusion.models.modeling_flax_pytorch_utils import convert_f5_state_dict_to_flax
 import os
 from importlib.resources import files
@@ -76,11 +77,11 @@ def loop_body(
     null_pred = transformer.apply(
         {"params": state.params},
         x=latents,
-        cond=cond,
+        cond=jnp.zeros_like(cond),
         decoder_segment_ids=decoder_segment_ids,
         text_embed=text_embed_uncond,
         timestep=t_vec,
-        drop_audio_cond=True,
+        #drop_audio_cond=True,
     )
     pred = pred + (pred - null_pred) * cfg_strength
     latents = latents + (t_prev - t_curr) * pred
@@ -265,14 +266,14 @@ def run(config):
     num_devices = len(jax.devices())
     data_sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
     #data_sharding = jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), "sequence"))
-    batch_size = 1 * num_devices
+    batch_size = 3 * num_devices
     local_speed = 1
     max_duration = 4096
     ref_text = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
     if len(ref_text[-1].encode("utf-8")) == 1:
         ref_text = ref_text + " "
-    #gen_text = "Hello,I'm Aurora.And nice to meet you.This is a very long sentence intended to test the stability of the model.I really like this model and so I use it a lot."
-    gen_text = "The sun was setting behind the mountains, casting a golden glow over the quiet village as a gentle breeze rustled the leaves, carrying the distant laughter of children playing near the river while an old man sat on his porch, sipping tea and watching the world slow down, his mind drifting to memories of his youth, the days when he, too, ran through the fields with boundless energy, never imagining that one day he would sit here, content yet wistful, as the cycle of life continued around him, unchanging and eternal."
+    gen_text = "Hello,I'm Aurora.And nice to meet you.This is a very long sentence intended to test the stability of the model.I really like this model and so I use it a lot."
+    #gen_text = "The impact of technology on modern society is profound, influencing nearly every aspect of daily life, from communication to healthcare, education, and business. The rapid advancements in artificial intelligence, automation, and digital connectivity have transformed the way people interact, work, and access information. Social media platforms have redefined communication, enabling instant global connections but also raising concerns about privacy, mental health, and misinformation. In the workplace, automation and AI-driven tools have increased efficiency and productivity while simultaneously reshaping job markets, requiring individuals to continuously adapt and acquire new skills. In education, online learning platforms and digital resources have made knowledge more accessible, bridging gaps in traditional education systems but also highlighting issues of digital divide and screen dependency. Healthcare has seen groundbreaking innovations such as telemedicine, wearable health monitors, and AI-assisted diagnostics, improving patient care but also posing ethical and regulatory challenges. Despite these advancements, concerns about cybersecurity, data privacy, and the ethical implications of AI remain pressing issues. As technology continues to evolve, balancing innovation with ethical considerations and ensuring equitable access to its benefits will be crucial for a sustainable and inclusive future. Ultimately, while technology offers immense potential to improve lives, its responsible and mindful use is essential to mitigating its challenges."
     ref_audio, ref_sr = librosa.load("/root/MaxTTS-Diffusion/test.mp3",sr=24000)
     max_chars = int(len(ref_text.encode("utf-8")) / (ref_audio.shape[-1] / ref_sr) * (22 - ref_audio.shape[-1] / ref_sr))
     vocab_char_map, vocab_size = get_tokenizer(config.vocab_name_or_path, "custom")
@@ -406,13 +407,18 @@ def run(config):
 
     out = jax.device_put(out, data_sharding)
     res = jax.jit(vocos_model.apply,out_shardings=None)({"params":vocos_params},out,rngs=rng)
-    res = np.asarray(res)
-    
+
     import soundfile as sf
-    output_segment = res[0][ref_audio_len*256:duration[0]*256]
+    
+    t0 = time.perf_counter()
+    
+    res_cpu = np.asarray(res)
+    output_segment = res_cpu[0][ref_audio_len*256:duration[0]*256]
     for i in range(batch_size - padded_batch_size):
-        output_segment = np.concatenate((output_segment,res[i+1][ref_audio_len*256:duration[i+1]*256]))
+        output_segment = np.concatenate((output_segment,res_cpu[i+1][ref_audio_len*256:duration[i+1]*256]))
     sf.write("output.wav",output_segment,samplerate=24000)
+    t1 = time.perf_counter()
+    max_logging.log(f"transfer to cpu first and slice time: {t1 - t0:.1f}s.")
 
     return None
 

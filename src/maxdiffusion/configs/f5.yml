@@ -23,6 +23,7 @@ gcs_metrics: False
 save_config_to_gcs: False
 log_period: 100
 
+vocoder_model_path: ''
 pretrained_model_name_or_path: '/root/aurora_f5_v1/model_70000.pt'
 vocab_name_or_path: '/root/aurora_f5_v1/vocab.txt'
 use_ema: True
@@ -30,6 +31,14 @@ use_ema: True
 # Flux params
 f5_name: "f5-dev"
 max_sequence_length: 4096
+latent_dim: 100
+text_dim: 512
+num_layers: 12
+num_heads: 8
+mlp_ratio: 2.
+n_mels: 100
+text_conv_layers: 4
+
 time_shift: True
 base_shift: 0.5
 max_shift: 1.15

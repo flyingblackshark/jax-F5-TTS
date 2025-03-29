@@ -179,10 +179,15 @@ class InputEmbedding(nn.Module):
     out_dim: int
 
     @nn.compact
-    def __call__(self, x, cond, text_embed,decoder_segment_ids=None, drop_audio_cond=False):
+    def __call__(self, x, 
+                 cond, 
+                 text_embed,
+                 decoder_segment_ids=None,
+                  #drop_audio_cond=False
+                  ):
         # 如果 drop_audio_cond 为 True，则将 cond 置为全 0
-        if drop_audio_cond:
-            cond = jnp.zeros_like(cond)
+        # if drop_audio_cond:
+        #     cond = jnp.zeros_like(cond)
         
         # 将 x, cond, text_embed 在最后一个维度上拼接
         concat_input = jnp.concatenate([x, cond, text_embed], axis=-1)
@@ -277,13 +282,17 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, theta_resca
     return jnp.concatenate([freqs_cos, freqs_sin], axis=-1)
 
 class F5TextEmbedding(nn.Module):
+
     text_num_embeds:int
     text_dim:int
     conv_layers:int=0
     conv_mult:int=2
     theta:int = 1000
+    dtype: jnp.dtype = jnp.float32
+    weights_dtype: jnp.dtype = jnp.float32
+    precision: jax.lax.Precision = None
     def setup(self):
-        self.text_embed = nn.Embed(self.text_num_embeds + 1, self.text_dim)  # use 0 as filler token
+        self.text_embed = nn.Embed(self.text_num_embeds + 1, self.text_dim, dtype=self.dtype)  # use 0 as filler token
         
         if self.conv_layers > 0:
             self.extra_modeling = True
@@ -533,7 +542,7 @@ class F5Transformer2DModel(nn.Module):
       decoder_segment_ids, #mask
       #text_decoder_segment_ids,#text mask
       #drop_text:bool = False,
-      drop_audio_cond:bool = False,
+      #drop_audio_cond:bool = False,
       train: bool = False,
   ):
     batch, seq_len = x.shape[0], x.shape[1]
@@ -543,7 +552,12 @@ class F5Transformer2DModel(nn.Module):
     #    txt_ids = jnp.zeros_like(txt_ids)
     #text_embed = self.text_embed(txt_ids, seq_len,decoder_segment_ids=decoder_segment_ids,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
     #text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
-    x = self.input_embed(x,cond,text_embed,decoder_segment_ids=decoder_segment_ids,drop_audio_cond=drop_audio_cond) * decoder_segment_ids[...,jnp.newaxis]
+    x = self.input_embed(x,
+                         cond,
+                         text_embed,
+                         decoder_segment_ids=decoder_segment_ids,
+                         #drop_audio_cond=drop_audio_cond
+                         ) * decoder_segment_ids[...,jnp.newaxis]
     image_rotary_emb = self.rotary_embed.forward_from_seq_len(seq_len)
     #image_rotary_emb = nn.with_logical_constraint(image_rotary_emb, ("activation_batch", "activation_embed"))
 
