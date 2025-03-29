@@ -18,8 +18,6 @@ from typing import Callable, List, Union, Sequence
 from absl import app
 from contextlib import ExitStack
 import functools
-import math
-import time
 import jax.experimental
 import jax.experimental.compilation_cache.compilation_cache
 import jax.experimental.ode
@@ -61,7 +59,6 @@ def loop_body(
     transformer,
     cond,
     txt_ids,
-    decoder_segment_ids,
     text_decoder_segment_ids,
 ):
     latents, state, c_ts, p_ts = args
@@ -73,7 +70,6 @@ def loop_body(
         {"params": state.params},
         x=latents,
         cond=cond,
-        decoder_segment_ids=decoder_segment_ids,
         text_decoder_segment_ids=text_decoder_segment_ids,
         txt_ids=txt_ids,
         timestep=t_vec,
@@ -82,7 +78,6 @@ def loop_body(
         {"params": state.params},
         x=latents,
         cond=cond,
-        decoder_segment_ids=decoder_segment_ids,
         text_decoder_segment_ids=text_decoder_segment_ids,
         txt_ids=txt_ids,
         timestep=t_vec,
@@ -90,16 +85,15 @@ def loop_body(
         drop_audio_cond=True,
     )
     pred = pred + (pred - null_pred) * cfg_strength
-
     latents = latents + (t_prev - t_curr) * pred
     latents = jnp.array(latents, dtype=latents_dtype)
     return latents, state, c_ts, p_ts
 
 def run_inference(
-    states, transformer, config, mesh, latents, cond, decoder_segment_ids, text_decoder_segment_ids, txt_ids, c_ts, p_ts
+    states, transformer, config, mesh, latents, cond, text_decoder_segment_ids, txt_ids, c_ts, p_ts
 ):
 
-  transformer_state = states#["transformer"]
+  transformer_state = states
 
 
   loop_body_p = functools.partial(
@@ -107,10 +101,8 @@ def run_inference(
       transformer=transformer,
       cond=cond,
       txt_ids=txt_ids,
-      decoder_segment_ids=decoder_segment_ids,
       text_decoder_segment_ids=text_decoder_segment_ids,
   )
-  #vae_decode_p = functools.partial(vae_decode, vae=vae, state=vae_state, config=config)
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     latents, _, _, _ = jax.lax.fori_loop(0, len(c_ts), loop_body_p, (latents, transformer_state, c_ts, p_ts))
@@ -123,7 +115,7 @@ def run(config):
     devices_array = create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
-    global_batch_size = config.per_device_batch_size * jax.local_device_count()
+    #global_batch_size = config.per_device_batch_size * jax.local_device_count()
 
 
     # LOAD TRANSFORMER
@@ -156,10 +148,6 @@ def run(config):
         return jnp.log(jnp.clip(x,min=clip_val) * C)
 
     def get_mel(y, n_mels=100,n_fft=1024,win_size=1024,hop_length=256,fmin=0,fmax=None,clip_val=1e-7,sampling_rate=24000):
-
-        #pad_left = (win_size - hop_length) //2
-        #pad_right = max((win_size - hop_length + 1) //2, win_size - y.shape[-1] - pad_left)
-        #y = jnp.pad(y, ((0,0),(pad_left, pad_right)))
         window = jnp.hanning(win_size)
         spec_func = functools.partial(audax.core.functional.spectrogram, pad=0, window=window, n_fft=n_fft,
                         hop_length=hop_length, win_length=win_size, power=1.,
@@ -275,10 +263,16 @@ def run(config):
             chunks.append(current_chunk.strip())
 
         return chunks
-    num_devices = len(jax.devices())
-    batch_size = 1 * num_devices
+    #num_devices = len(jax.devices())
+    #data_sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
+    data_sharding = jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), "sequence"))
+    batch_size = 1
+    local_speed = 1
+    max_duration = 4096
     ref_text = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
-    gen_text = "Hello , I'm Aurora.And nice to meet you."
+    if len(ref_text[-1].encode("utf-8")) == 1:
+        ref_text = ref_text + " "
+    gen_text = "Hello,I'm Aurora.And nice to meet you.This is a very long sentence intended to test the stability of the model.I really like this model and so I use it a lot."
     ref_audio, ref_sr = librosa.load("/root/MaxTTS-Diffusion/test.mp3",sr=24000)
     #max_chars = int(len(ref_text.encode("utf-8")) / (ref_audio.shape[-1] / ref_sr) * (22 - ref_audio.shape[-1] / ref_sr))
     #gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
@@ -288,13 +282,20 @@ def run(config):
     def list_str_to_idx(
         text: list[str] | list[list[str]],
         vocab_char_map: dict[str, int],  # {char: idx}
-        padding_value=-1,
+        #padding_value=-1,
     ):  # noqa: F722
         list_idx_tensors = [[vocab_char_map.get(c, 0) for c in t] for t in text]  # pinyin or char style
         #text = pad_sequence(list_idx_tensors, padding_value=padding_value, batch_first=True)
         return list_idx_tensors
     text_ids = list_str_to_idx(final_text_list, vocab_char_map)
-    cond = jax.jit(get_mel)(ref_audio[np.newaxis,:])
+    
+    ref_max_length = max_duration * 256 
+    ref_audio_len = ref_audio.shape[-1] // 256 + 1
+    ref_audio = np.pad(ref_audio,(0,ref_max_length - 256 - ref_audio.shape[0]))
+    
+    ref_audio = jax.device_put(ref_audio[np.newaxis,:],data_sharding)
+    
+
     text_ids = jnp.asarray(text_ids)
     text_ids = text_ids + 1
 
@@ -311,75 +312,43 @@ def run(config):
         mask = seq < t[:, None]  # 形状: (b, n)
         
         return mask
-    local_speed = 0.5
-    ref_audio_len = ref_audio.shape[-1] // 256 + 1
-    max_duration = 2048
+    
     ref_text_len = len(ref_text.encode("utf-8"))
     gen_text_len = len(gen_text.encode("utf-8"))
     duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
 
-    lens = jnp.full((batch_size,), cond.shape[1])
-
-    duration = jnp.maximum(
-            jnp.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
-    ) 
-    ref_len = cond.shape[1]
-
+    lens = jnp.full((batch_size,), ref_audio_len)
+    
+    # duration = np.maximum(
+    #         np.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
+    # ) 
+    duration = (duration // 256) * 256 + 256
     cond_mask = lens_to_mask(lens)
-    mask = lens_to_mask(duration)
+    #mask = lens_to_mask(duration)
+    cond = jax.jit(get_mel,out_shardings=None)(ref_audio)[:,:duration,:]
 
-    cond_mask = jnp.pad(cond_mask, ((0,batch_size-cond_mask.shape[0]),(0, max_duration - cond_mask.shape[-1])), constant_values=False)
-    mask = jnp.pad(mask, ((0,batch_size-mask.shape[0]),(0, max_duration - mask.shape[-1])), constant_values=False)
-    text_ids = jnp.pad(text_ids, ((0,batch_size-text_ids.shape[0]),(0, max_duration - text_ids.shape[-1])))
+
+    
+    cond_mask = jnp.pad(cond_mask, ((0,batch_size-cond_mask.shape[0]),(0, duration - cond_mask.shape[-1])), constant_values=False)
+    #mask = jnp.pad(mask, ((0,batch_size-mask.shape[0]),(0, max_duration - mask.shape[-1])), constant_values=False)
+    text_ids = jnp.pad(text_ids, ((0,batch_size-text_ids.shape[0]),(0, duration - text_ids.shape[-1])))
     text_decoder_segment_ids = (text_ids != 0).astype(jnp.int32)
-    decoder_segment_ids = mask.astype(jnp.int32)
+    #decoder_segment_ids = mask.astype(jnp.int32)
     
     
-    cond = jnp.pad(cond, ((0,batch_size-cond.shape[0]),(0, max_duration - cond.shape[1]),(0,0)))
+    #cond = jnp.pad(cond, ((0,batch_size-cond.shape[0]),(0, duration - cond.shape[1]),(0,0)))
     step_cond = jnp.where(
         cond_mask[...,jnp.newaxis], cond, jnp.zeros_like(cond)
     ) 
 
     
     
-    # def ode_rhs(z, t):
-    #     pred = model.apply({"params":params},
-    #     x=z,
-    #     cond=cond_mel,
-    #     text=text,
-    #     timestep=t,
-    #     mask=None,
-    #     text_mask=text_mask,
-    #     drop_text=False,
-    #     drop_audio_cond=False,
-    #     rngs=rng
-    #     )
-    #     null_pred = model.apply({"params":params},
-    #     x=z,
-    #     cond=cond_mel,
-    #     text=text,
-    #     timestep=t,
-    #     mask=None,
-    #     text_mask=text_mask,
-    #     drop_text=True,
-    #     drop_audio_cond=True,
-    #     rngs=rng
-    #     )
-    #     return pred + (pred - null_pred) * cfg_strength
-    # def euler_step(y, t_step):
-    #     t_prev, t_next = t_step
-    #     dt = t_next - t_prev
-    #     dy = ode_rhs(y, t_prev)
-    #     return y + dt * dy
+    latents = jax.random.normal(jax.random.PRNGKey(0), (batch_size,duration,100))
+    #latents = jnp.pad(latents,((0,0),(0,max_duration-duration[0]),(0,0)))
+    latents = jax.device_put(latents, data_sharding)
+    step_cond = jax.device_put(step_cond, data_sharding)
+    text_ids = jax.device_put(text_ids, data_sharding)
 
-    # def body(idx, carry):
-    #     y_prev = carry
-    #     current_t = t[idx]
-    #     next_t = t[idx+1]
-    #     return euler_step(y_prev, (current_t, next_t))
-
-
-    latents = jax.random.normal(jax.random.PRNGKey(0), (batch_size,max_duration,100))
     t_start = 0
     timesteps = jnp.linspace(t_start, 1.0, config.num_inference_steps + 1).astype(jnp.float32)
     timesteps = timesteps + config.sway_sampling_coef * (jnp.cos(jnp.pi / 2 * timesteps) - 1 + timesteps) # sway sampling
@@ -395,10 +364,7 @@ def run(config):
         latents=latents,
         cond=step_cond,
         text_decoder_segment_ids=text_decoder_segment_ids,
-        decoder_segment_ids=decoder_segment_ids,
         txt_ids=text_ids,
-        #vec=pooled_prompt_embeds,
-        #guidance_vec=guidance,
         c_ts=c_ts,
         p_ts=p_ts,
     ),
@@ -407,18 +373,19 @@ def run(config):
     )
 
     y_final = p_run_inference(transformer_state)
-
-    #y_final = jax.lax.fori_loop(0, steps, body, y0)
-
     out = y_final
     out = jnp.where(cond_mask[...,jnp.newaxis], cond, out)
-    out = out[:1]
+    #out = out[:1]
     from jax_vocos import load_model
     vocos_model,vocos_params = load_model()
     rng = {'params': jax.random.PRNGKey(0), 'dropout': jax.random.PRNGKey(0)}
-    res = jax.jit(vocos_model.apply)({"params":vocos_params},out[:,ref_len:duration[0]],rngs=rng)
+
+    out = jax.device_put(out, data_sharding)
+    res = jax.jit(vocos_model.apply,out_shardings=None)({"params":vocos_params},out,rngs=rng)
+    
     import soundfile as sf
-    sf.write("output.wav",res[0],samplerate=24000)
+    #os.remove("output.wav")
+    sf.write("output.wav",res[0][ref_audio_len*256:duration*256],samplerate=24000)
 
     return None
 

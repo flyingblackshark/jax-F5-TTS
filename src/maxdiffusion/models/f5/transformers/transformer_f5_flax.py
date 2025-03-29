@@ -21,11 +21,8 @@ import jax.numpy as jnp
 import flax
 import flax.linen as nn
 from einops import repeat, rearrange
-from ....configuration_utils import ConfigMixin, flax_register_to_config
-from ...modeling_flax_utils import FlaxModelMixin
-from ...normalization_flax import AdaLayerNormZeroSingle, AdaLayerNormContinuous, AdaLayerNormZero
+from ...normalization_flax import AdaLayerNormContinuous, AdaLayerNormZero
 from ...attention_flax import FlaxF5Attention
-from ...embeddings_flax import (CombinedTimestepGuidanceTextProjEmbeddings, CombinedTimestepTextProjEmbeddings, get_1d_rotary_pos_embed)
 from .... import common_types
 from ....common_types import BlockSizes
 from ....utils import BaseOutput
@@ -50,7 +47,7 @@ class Transformer2DModelOutput(BaseOutput):
   sample: jnp.ndarray
 
 
-class FluxTransformerBlock(nn.Module):
+class F5TransformerBlock(nn.Module):
   r"""
   A Transformer block following the MMDiT architecture, introduced in Stable Diffusion 3.
 
@@ -133,14 +130,13 @@ class FluxTransformerBlock(nn.Module):
     self._chunk_size = None
     self._chunk_dim = 0
 
-  def __call__(self, x, temb, decoder_segment_ids=None,image_rotary_emb=None):
+  def __call__(self, x, temb, image_rotary_emb=None):
     norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=temb)
 
     # Attention.
     attn_output = self.attn(
         hidden_states=norm_hidden_states,
         rope=image_rotary_emb,
-        decoder_segment_ids=decoder_segment_ids
     )
 
     x = x + gate_msa * attn_output
@@ -403,8 +399,7 @@ class RotaryEmbedding(nn.Module):
         t = jnp.arange(seq_len)
         return self.__call__(t)
 
-    def __call__(self, t: jax.Array):
-        max_pos = jnp.max(t) + 1
+    def __call__(self, t: jax.Array , max_pos:int = 4096):
 
         if t.ndim == 1:
             t = jnp.expand_dims(t, axis=0)
@@ -482,7 +477,7 @@ class F5Transformer2DModel(nn.Module):
 
     blocks = []
     for _ in range(self.depth):
-      block = FluxTransformerBlock(
+      block = F5TransformerBlock(
           dim=self.dim,
           num_attention_heads=self.heads,
           attention_head_dim=self.dim_head,
@@ -524,8 +519,8 @@ class F5Transformer2DModel(nn.Module):
       cond, #masked cond audio
       txt_ids, #text
       timestep, #time step
-      decoder_segment_ids, #mask
-      text_decoder_segment_ids,
+      #decoder_segment_ids, #mask
+      text_decoder_segment_ids,#text mask
       drop_text:bool = False,
       drop_audio_cond:bool = False,
       train: bool = False,
@@ -546,7 +541,7 @@ class F5Transformer2DModel(nn.Module):
           x=x,
           temb=t,
           image_rotary_emb=image_rotary_emb,
-          decoder_segment_ids=decoder_segment_ids,
+          #decoder_segment_ids=decoder_segment_ids,
       )
 
     x = self.norm_out(x, t)
@@ -565,10 +560,10 @@ class F5Transformer2DModel(nn.Module):
         max_sequence_length,
         100
     )
-    decoder_segment_ids = (
-        batch_size,
-        max_sequence_length
-    )
+    # decoder_segment_ids = (
+    #     batch_size,
+    #     max_sequence_length
+    # )
     # bs, encoder_input, seq_length
     text_ids_shape = (
         batch_size,
@@ -583,7 +578,7 @@ class F5Transformer2DModel(nn.Module):
     img = jnp.zeros(batch_image_shape, dtype=self.dtype)
 
     txt_ids = jnp.zeros(text_ids_shape, dtype=jnp.int32)
-    decoder_segment_ids = jnp.zeros(decoder_segment_ids, dtype=jnp.int32)
+    #decoder_segment_ids = jnp.zeros(decoder_segment_ids, dtype=jnp.int32)
     text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids,dtype=jnp.int32)
     t = jnp.asarray((0,))
     mask = None
@@ -595,7 +590,7 @@ class F5Transformer2DModel(nn.Module):
             cond=img,
             txt_ids=txt_ids,
             timestep=t,
-            decoder_segment_ids=decoder_segment_ids,
+            #decoder_segment_ids=decoder_segment_ids,
             text_decoder_segment_ids=text_decoder_segment_ids,
       )["params"]
     else:
@@ -605,6 +600,6 @@ class F5Transformer2DModel(nn.Module):
             cond=img,
             txt_ids=txt_ids,
             timestep=t,
-            decoder_segment_ids=decoder_segment_ids,
+            #decoder_segment_ids=decoder_segment_ids,
             text_decoder_segment_ids=text_decoder_segment_ids,
         )["params"]

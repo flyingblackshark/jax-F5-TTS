@@ -60,7 +60,7 @@ jit_initializers: True
 # Set true to load weights from pytorch
 from_pt: True
 split_head_dim: True
-attention: 'dot_product' # Supported attention: dot_product, flash, cudnn_flash_te
+attention: 'flash' # Supported attention: dot_product, flash, cudnn_flash_te
 
 flash_block_sizes: {}
 # Use the following flash_block_sizes on v6e (Trillium) due to larger vmem.
@@ -120,7 +120,7 @@ base_output_directory: ""
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu'
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'tensor']
+mesh_axes: ['data', 'fsdp', 'tensor', 'sequence', 'context']
 
 # batch : batch dimension of data and activations
 # hidden :
@@ -137,16 +137,20 @@ mesh_axes: ['data', 'fsdp', 'tensor']
 logical_axis_rules: [
                       ['batch', 'data'],
                       ['activation_batch', ['data','fsdp']],
-                      ['activation_heads', 'tensor'],
+                      ['activation_heads', ['tensor', 'sequence']],
                       ['activation_kv', 'tensor'],
+                      ['activation_length', ['context', 'sequence']],
+                      ['activation_length', ['context']],
+                      ['activation_length_q', ['context']],
+                      ['activation_kv_length', ['context']],
                       ['mlp','tensor'],
-                      ['embed','fsdp'],
+                      ['embed', ['fsdp', 'sequence']],
                       ['heads', 'tensor'],
                       ['conv_batch', ['data','fsdp']],
                       ['out_channels', 'tensor'],
                       ['conv_out', 'fsdp'],
                     ]
-data_sharding: [['data', 'fsdp', 'tensor']]
+data_sharding: [['data', 'fsdp', 'tensor', 'sequence', 'context']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -155,9 +159,13 @@ data_sharding: [['data', 'fsdp', 'tensor']]
 dcn_data_parallelism: 1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: -1
 dcn_tensor_parallelism: 1
-ici_data_parallelism: -1
+dcn_sequence_parallelism: 1
+dcn_context_parallelism: 1
+ici_data_parallelism: 1
 ici_fsdp_parallelism: 1  # recommended ICI axis to be auto-sharded
 ici_tensor_parallelism: 1
+ici_sequence_parallelism: -1
+ici_context_parallelism: 1
 
 # Dataset
 # Replace with dataset path or train_data_dir. One has to be set.
