@@ -63,7 +63,7 @@ def loop_body(
     text_decoder_segment_ids,
     duration,
 ):
-    latents, state, c_ts, p_ts = args
+    latents,state, c_ts, p_ts = args
     latents_dtype = latents.dtype
     t_curr = c_ts[step]
     t_prev = p_ts[step]
@@ -76,7 +76,6 @@ def loop_body(
         text_decoder_segment_ids=text_decoder_segment_ids,
         txt_ids=txt_ids,
         timestep=t_vec,
-        duration=duration,
     )
     null_pred = transformer.apply(
         {"params": state.params},
@@ -86,7 +85,6 @@ def loop_body(
         text_decoder_segment_ids=text_decoder_segment_ids,
         txt_ids=txt_ids,
         timestep=t_vec,
-        duration=duration,
         drop_text=True,
         drop_audio_cond=True,
     )

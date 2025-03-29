@@ -33,20 +33,6 @@ LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
 
-
-@flax.struct.dataclass
-class Transformer2DModelOutput(BaseOutput):
-  """
-  The output of [`FluxTransformer2DModel`].
-
-  Args:
-  sample (`jnp.ndarray` of shape `(batch_size, num_channels, height, width)`):
-    The hidden states output conditioned on `encoder_hidden_states` input. Output of last layer of model.
-  """
-
-  sample: jnp.ndarray
-
-
 class F5TransformerBlock(nn.Module):
   r"""
   A Transformer block following the MMDiT architecture, introduced in Stable Diffusion 3.
@@ -172,6 +158,9 @@ class ConvPositionEmbedding(nn.Module):
         )(x)
         x = jax.nn.mish(x)
         
+        if mask is not None:
+            x = jnp.where(mask_expanded, x, 0.0)
+        
         x = nn.Conv(
             features=self.dim,
             kernel_size=(self.kernel_size,),
@@ -201,7 +190,7 @@ class InputEmbedding(nn.Module):
         if decoder_segment_ids is not None:
             x_proj = x_proj * decoder_segment_ids[...,jnp.newaxis]
         # 将卷积位置编码加到投影结果上
-        x_out = x_proj + ConvPositionEmbedding(dim=self.out_dim)(x_proj)
+        x_out = x_proj + ConvPositionEmbedding(dim=self.out_dim)(x_proj,mask=decoder_segment_ids)
         if decoder_segment_ids is not None:
             x_out = x_out * decoder_segment_ids[...,jnp.newaxis]
         return x_out
@@ -302,7 +291,7 @@ class TextEmbedding(nn.Module):
         else:
             self.extra_modeling = False
 
-    def __call__(self, text, seq_len,text_decoder_segment_ids, drop_text=False):  # noqa: F722
+    def __call__(self, text, seq_len,decoder_segment_ids,text_decoder_segment_ids, drop_text=False):  # noqa: F722
         
         batch, text_len = text.shape[0], text.shape[1]
 
@@ -315,7 +304,7 @@ class TextEmbedding(nn.Module):
         if self.extra_modeling:
             # sinus pos emb
             batch_start = jnp.zeros((batch,))
-            pos_idx = get_pos_embed_indices(batch_start, seq_len, max_pos=self.precompute_max_pos)
+            pos_idx = get_pos_embed_indices(batch_start, seq_len, max_pos=self.precompute_max_pos) * decoder_segment_ids
             text_pos_embed = self.freqs_cis[pos_idx]
             text = text + text_pos_embed
 
@@ -423,31 +412,6 @@ class RotaryEmbedding(nn.Module):
         return freqs_complex, scale_complex
     
 class F5Transformer2DModel(nn.Module):
-  r"""
-  The Tranformer model introduced in Flux.
-
-  Reference: https://blackforestlabs.ai/announcing-black-forest-labs/
-
-  This model inherits from [`FlaxModelMixin`]. Check the superclass documentation for it's generic methods
-  implemented for all models (such as downloading or saving).
-
-  This model is also a Flax Linen [flax.linen.Module](https://flax.readthedocs.io/en/latest/flax.linen.html#module)
-  subclass. Use it as a regular Flax Linen module and refer to the Flax documentation for all matters related to its
-  general usage and behavior.
-
-  Parameters:
-      patch_size (`int`): Patch size to turn the input data into small patches.
-      in_channels (`int`, *optional*, defaults to 16): The number of channels in the input.
-      num_layers (`int`, *optional*, defaults to 18): The number of layers of MMDiT blocks to use.
-      num_single_layers (`int`, *optional*, defaults to 18): The number of layers of single DiT blocks to use.
-      attention_head_dim (`int`, *optional*, defaults to 64): The number of channels in each head.
-      num_attention_heads (`int`, *optional*, defaults to 18): The number of heads to use for multi-head attention.
-      joint_attention_dim (`int`, *optional*): The number of `encoder_hidden_states` dimensions to use.
-      pooled_projection_dim (`int`): Number of dimensions to use when projecting the `pooled_projections`.
-      guidance_embeds (`bool`, defaults to False): Whether to use guidance embeddings.
-
-  """
-
   flash_min_seq_length: int = 4096
   flash_block_sizes: BlockSizes = None
   mesh: jax.sharding.Mesh = None
@@ -525,7 +489,6 @@ class F5Transformer2DModel(nn.Module):
       timestep, #time step
       decoder_segment_ids, #mask
       text_decoder_segment_ids,#text mask
-      duration, #duration
       drop_text:bool = False,
       drop_audio_cond:bool = False,
       train: bool = False,
@@ -535,7 +498,7 @@ class F5Transformer2DModel(nn.Module):
     t = self.time_embed(timestep)
     if drop_text:  # cfg for text
         txt_ids = jnp.zeros_like(txt_ids)
-    text_embed = self.text_embed(txt_ids, seq_len,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
+    text_embed = self.text_embed(txt_ids, seq_len,decoder_segment_ids=decoder_segment_ids,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
     text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
     x = self.input_embed(x,cond,text_embed,decoder_segment_ids=decoder_segment_ids,drop_audio_cond=drop_audio_cond) * decoder_segment_ids[...,jnp.newaxis]
     image_rotary_emb = self.rotary_embed.forward_from_seq_len(seq_len)
@@ -570,9 +533,6 @@ class F5Transformer2DModel(nn.Module):
         batch_size,
         max_sequence_length,
     )
-    duration_shape = (
-        batch_size,
-    )
 
     text_decoder_segment_ids_shape = (
         batch_size,
@@ -581,11 +541,9 @@ class F5Transformer2DModel(nn.Module):
 
     img = jnp.zeros(batch_image_shape, dtype=self.dtype)
     txt_ids = jnp.zeros(text_ids_shape, dtype=jnp.int32)
-    duration = jnp.zeros(duration_shape, dtype=jnp.int32)
     decoder_segment_ids = jnp.zeros(decoder_segment_ids_shape, dtype=jnp.int32)
     text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids_shape,dtype=jnp.int32)
     t = jnp.asarray((0,))
-    mask = None
     if eval_only:
       return jax.eval_shape(
           self.init,
@@ -596,7 +554,6 @@ class F5Transformer2DModel(nn.Module):
             timestep=t,
             decoder_segment_ids=decoder_segment_ids,
             text_decoder_segment_ids=text_decoder_segment_ids,
-            duration=duration,
       )["params"]
     else:
         return self.init(
@@ -607,5 +564,4 @@ class F5Transformer2DModel(nn.Module):
             timestep=t,
             decoder_segment_ids=decoder_segment_ids,
             text_decoder_segment_ids=text_decoder_segment_ids,
-            duration=duration,
         )["params"]
