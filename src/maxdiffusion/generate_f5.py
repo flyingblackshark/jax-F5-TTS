@@ -59,7 +59,9 @@ def loop_body(
     transformer,
     cond,
     txt_ids,
+    decoder_segment_ids,
     text_decoder_segment_ids,
+    duration,
 ):
     latents, state, c_ts, p_ts = args
     latents_dtype = latents.dtype
@@ -70,17 +72,21 @@ def loop_body(
         {"params": state.params},
         x=latents,
         cond=cond,
+        decoder_segment_ids=decoder_segment_ids,
         text_decoder_segment_ids=text_decoder_segment_ids,
         txt_ids=txt_ids,
         timestep=t_vec,
+        duration=duration,
     )
     null_pred = transformer.apply(
         {"params": state.params},
         x=latents,
         cond=cond,
+        decoder_segment_ids=decoder_segment_ids,
         text_decoder_segment_ids=text_decoder_segment_ids,
         txt_ids=txt_ids,
         timestep=t_vec,
+        duration=duration,
         drop_text=True,
         drop_audio_cond=True,
     )
@@ -90,7 +96,7 @@ def loop_body(
     return latents, state, c_ts, p_ts
 
 def run_inference(
-    states, transformer, config, mesh, latents, cond, text_decoder_segment_ids, txt_ids, c_ts, p_ts
+    states, transformer, config, mesh, latents, cond, decoder_segment_ids,text_decoder_segment_ids, txt_ids,duration, c_ts, p_ts
 ):
 
   transformer_state = states
@@ -101,7 +107,9 @@ def run_inference(
       transformer=transformer,
       cond=cond,
       txt_ids=txt_ids,
+      decoder_segment_ids=decoder_segment_ids,
       text_decoder_segment_ids=text_decoder_segment_ids,
+      duration=duration,
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -263,10 +271,10 @@ def run(config):
             chunks.append(current_chunk.strip())
 
         return chunks
-    #num_devices = len(jax.devices())
-    #data_sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
-    data_sharding = jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), "sequence"))
-    batch_size = 1
+    num_devices = len(jax.devices())
+    data_sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
+    #data_sharding = jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), "sequence"))
+    batch_size = 1 * num_devices
     local_speed = 1
     max_duration = 4096
     ref_text = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
@@ -293,7 +301,7 @@ def run(config):
     ref_audio_len = ref_audio.shape[-1] // 256 + 1
     ref_audio = np.pad(ref_audio,(0,ref_max_length - 256 - ref_audio.shape[0]))
     
-    ref_audio = jax.device_put(ref_audio[np.newaxis,:],data_sharding)
+    ref_audio = jax.device_put(ref_audio[np.newaxis,:],jax.sharding.NamedSharding(mesh, P(None, "data")))
     
 
     text_ids = jnp.asarray(text_ids)
@@ -319,21 +327,21 @@ def run(config):
 
     lens = jnp.full((batch_size,), ref_audio_len)
     
-    # duration = np.maximum(
-    #         np.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
-    # ) 
+    duration = np.maximum(
+            np.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
+    ) 
     duration = (duration // 256) * 256 + 256
     cond_mask = lens_to_mask(lens)
-    #mask = lens_to_mask(duration)
-    cond = jax.jit(get_mel,out_shardings=None)(ref_audio)[:,:duration,:]
+    mask = lens_to_mask(duration)
+    cond = jax.jit(get_mel,out_shardings=None)(ref_audio)
 
 
     
-    cond_mask = jnp.pad(cond_mask, ((0,batch_size-cond_mask.shape[0]),(0, duration - cond_mask.shape[-1])), constant_values=False)
-    #mask = jnp.pad(mask, ((0,batch_size-mask.shape[0]),(0, max_duration - mask.shape[-1])), constant_values=False)
-    text_ids = jnp.pad(text_ids, ((0,batch_size-text_ids.shape[0]),(0, duration - text_ids.shape[-1])))
+    cond_mask = jnp.pad(cond_mask, ((0,batch_size-cond_mask.shape[0]),(0, max_duration - cond_mask.shape[-1])), constant_values=False)
+    mask = jnp.pad(mask, ((0,batch_size-mask.shape[0]),(0, max_duration - mask.shape[-1])), constant_values=False)
+    text_ids = jnp.pad(text_ids, ((0,batch_size-text_ids.shape[0]),(0, max_duration - text_ids.shape[-1])))
     text_decoder_segment_ids = (text_ids != 0).astype(jnp.int32)
-    #decoder_segment_ids = mask.astype(jnp.int32)
+    decoder_segment_ids = mask.astype(jnp.int32)
     
     
     #cond = jnp.pad(cond, ((0,batch_size-cond.shape[0]),(0, duration - cond.shape[1]),(0,0)))
@@ -343,7 +351,7 @@ def run(config):
 
     
     
-    latents = jax.random.normal(jax.random.PRNGKey(0), (batch_size,duration,100))
+    latents = jax.random.normal(jax.random.PRNGKey(0), (batch_size,max_duration,100))
     #latents = jnp.pad(latents,((0,0),(0,max_duration-duration[0]),(0,0)))
     latents = jax.device_put(latents, data_sharding)
     step_cond = jax.device_put(step_cond, data_sharding)
@@ -363,8 +371,10 @@ def run(config):
         mesh=mesh,
         latents=latents,
         cond=step_cond,
+        decoder_segment_ids=decoder_segment_ids,
         text_decoder_segment_ids=text_decoder_segment_ids,
         txt_ids=text_ids,
+        duration=duration,
         c_ts=c_ts,
         p_ts=p_ts,
     ),
@@ -385,7 +395,7 @@ def run(config):
     
     import soundfile as sf
     #os.remove("output.wav")
-    sf.write("output.wav",res[0][ref_audio_len*256:duration*256],samplerate=24000)
+    sf.write("output.wav",res[0][ref_audio_len*256:duration[0]*256],samplerate=24000)
 
     return None
 

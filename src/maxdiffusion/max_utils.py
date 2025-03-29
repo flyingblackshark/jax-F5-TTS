@@ -269,15 +269,11 @@ def create_device_mesh(config, devices=None, logging=True):
       config.dcn_data_parallelism,
       config.dcn_fsdp_parallelism,
       config.dcn_tensor_parallelism,
-      config.dcn_sequence_parallelism,
-      config.dcn_context_parallelism,
   ]
   ici_parallelism = [
       config.ici_data_parallelism,
       config.ici_fsdp_parallelism,
       config.ici_tensor_parallelism,
-      config.ici_sequence_parallelism,
-      config.ici_context_parallelism,
   ]
 
   # Find possible unspecified parallelisms

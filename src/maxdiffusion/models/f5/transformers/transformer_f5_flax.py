@@ -130,13 +130,14 @@ class F5TransformerBlock(nn.Module):
     self._chunk_size = None
     self._chunk_dim = 0
 
-  def __call__(self, x, temb, image_rotary_emb=None):
+  def __call__(self, x, temb, image_rotary_emb=None,decoder_segment_ids=None):
     norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=temb)
 
     # Attention.
     attn_output = self.attn(
         hidden_states=norm_hidden_states,
         rope=image_rotary_emb,
+        decoder_segment_ids=decoder_segment_ids,
     )
 
     x = x + gate_msa * attn_output
@@ -189,7 +190,7 @@ class InputEmbedding(nn.Module):
     out_dim: int
 
     @nn.compact
-    def __call__(self, x, cond, text_embed, drop_audio_cond=False):
+    def __call__(self, x, cond, text_embed,decoder_segment_ids=None, drop_audio_cond=False):
         # 如果 drop_audio_cond 为 True，则将 cond 置为全 0
         if drop_audio_cond:
             cond = jnp.zeros_like(cond)
@@ -197,9 +198,12 @@ class InputEmbedding(nn.Module):
         # 将 x, cond, text_embed 在最后一个维度上拼接
         concat_input = jnp.concatenate([x, cond, text_embed], axis=-1)
         x_proj = nn.Dense(features=self.out_dim)(concat_input)
-        
+        if decoder_segment_ids is not None:
+            x_proj = x_proj * decoder_segment_ids[...,jnp.newaxis]
         # 将卷积位置编码加到投影结果上
         x_out = x_proj + ConvPositionEmbedding(dim=self.out_dim)(x_proj)
+        if decoder_segment_ids is not None:
+            x_out = x_out * decoder_segment_ids[...,jnp.newaxis]
         return x_out
     
 class GRN(nn.Module):
@@ -519,8 +523,9 @@ class F5Transformer2DModel(nn.Module):
       cond, #masked cond audio
       txt_ids, #text
       timestep, #time step
-      #decoder_segment_ids, #mask
+      decoder_segment_ids, #mask
       text_decoder_segment_ids,#text mask
+      duration, #duration
       drop_text:bool = False,
       drop_audio_cond:bool = False,
       train: bool = False,
@@ -531,8 +536,8 @@ class F5Transformer2DModel(nn.Module):
     if drop_text:  # cfg for text
         txt_ids = jnp.zeros_like(txt_ids)
     text_embed = self.text_embed(txt_ids, seq_len,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
-    #text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
-    x = self.input_embed(x,cond,text_embed,drop_audio_cond=drop_audio_cond)
+    text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
+    x = self.input_embed(x,cond,text_embed,decoder_segment_ids=decoder_segment_ids,drop_audio_cond=drop_audio_cond) * decoder_segment_ids[...,jnp.newaxis]
     image_rotary_emb = self.rotary_embed.forward_from_seq_len(seq_len)
     #image_rotary_emb = nn.with_logical_constraint(image_rotary_emb, ("activation_batch", "activation_embed"))
 
@@ -541,16 +546,12 @@ class F5Transformer2DModel(nn.Module):
           x=x,
           temb=t,
           image_rotary_emb=image_rotary_emb,
-          #decoder_segment_ids=decoder_segment_ids,
+          decoder_segment_ids=decoder_segment_ids,
       )
 
     x = self.norm_out(x, t)
     output = self.proj_out(x)
     return output
-    # if not return_dict:
-    #   return (output,)
-
-    # return Transformer2DModelOutput(sample=output)
 
   def init_weights(self, rngs, max_sequence_length, eval_only=True):
     num_devices = len(jax.devices())
@@ -560,26 +561,29 @@ class F5Transformer2DModel(nn.Module):
         max_sequence_length,
         100
     )
-    # decoder_segment_ids = (
-    #     batch_size,
-    #     max_sequence_length
-    # )
+    decoder_segment_ids_shape = (
+        batch_size,
+        max_sequence_length
+    )
     # bs, encoder_input, seq_length
     text_ids_shape = (
         batch_size,
         max_sequence_length,
     )
+    duration_shape = (
+        batch_size,
+    )
 
-    text_decoder_segment_ids = (
+    text_decoder_segment_ids_shape = (
         batch_size,
         max_sequence_length,
     )
 
     img = jnp.zeros(batch_image_shape, dtype=self.dtype)
-
     txt_ids = jnp.zeros(text_ids_shape, dtype=jnp.int32)
-    #decoder_segment_ids = jnp.zeros(decoder_segment_ids, dtype=jnp.int32)
-    text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids,dtype=jnp.int32)
+    duration = jnp.zeros(duration_shape, dtype=jnp.int32)
+    decoder_segment_ids = jnp.zeros(decoder_segment_ids_shape, dtype=jnp.int32)
+    text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids_shape,dtype=jnp.int32)
     t = jnp.asarray((0,))
     mask = None
     if eval_only:
@@ -590,8 +594,9 @@ class F5Transformer2DModel(nn.Module):
             cond=img,
             txt_ids=txt_ids,
             timestep=t,
-            #decoder_segment_ids=decoder_segment_ids,
+            decoder_segment_ids=decoder_segment_ids,
             text_decoder_segment_ids=text_decoder_segment_ids,
+            duration=duration,
       )["params"]
     else:
         return self.init(
@@ -600,6 +605,7 @@ class F5Transformer2DModel(nn.Module):
             cond=img,
             txt_ids=txt_ids,
             timestep=t,
-            #decoder_segment_ids=decoder_segment_ids,
+            decoder_segment_ids=decoder_segment_ids,
             text_decoder_segment_ids=text_decoder_segment_ids,
+            duration=duration,
         )["params"]
