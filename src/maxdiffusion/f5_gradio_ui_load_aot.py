@@ -38,9 +38,11 @@ import jax.experimental.compilation_cache
 from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
 import soundfile as sf
 import io
-
+import pickle
+from jax.experimental.serialize_executable import deserialize_and_load
+from f5_gradio_ui import list_str_to_idx,convert_char_to_pinyin,lens_to_mask,get_tokenizer,chunk_text
 # --- Configuration & Constants ---
-jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
+#jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
 MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
@@ -72,7 +74,32 @@ global_max_sequence_length = None # Will be set during setup
 #global_batch_size = None # Will be set during setup
 
 # --- Utility Functions (Mostly unchanged, slight modifications) ---
+def load_compiled(shaped_batch,path,partial_train, state):
+  """# Loading a serialized compiled train step function."""
 
+  # Currently partial_train and state  are needed to reconstruct
+  # input/output shapes to construct the in_trees and out_trees for load API
+  # Parker is working on a serializing these
+  def load_serialized_compiled(save_name):
+    with open(save_name, "rb") as f:
+      serialized_compiled = pickle.load(f)
+    return serialized_compiled
+
+  def get_train_input_output_trees(func, input_args, input_kwargs):
+    _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
+    out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
+    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    return in_tree_recreated, out_tree_recreated
+
+  serialized_compiled = load_serialized_compiled(path)
+  #shaped_batch = input_pipeline_interface.get_shaped_batch(config)
+  example_rng = jax.random.PRNGKey(0)
+  shaped_input_args = (state, shaped_batch, example_rng)
+  shaped_input_kwargs = {}
+  in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
+  p_func = deserialize_and_load(serialized_compiled, in_tree, out_tree)
+  return p_func
+  
 def dynamic_range_compression_jax(x, C=1, clip_val=1e-7):
     return jnp.log(jnp.clip(x, min=clip_val) * C)
 
@@ -96,177 +123,6 @@ def get_mel(y, n_mels=100, n_fft=1024, win_size=1024, hop_length=256, fmin=0, fm
     spec = mel_spec_func(spec)
     spec = dynamic_range_compression_jax(spec, clip_val=clip_val)
     return spec
-
-# JIT get_mel for performance
-#jitted_get_mel = jax.jit(get_mel, static_argnums=(1, 2, 3, 4, 5, 6, 8))
-
-def convert_char_to_pinyin(text_list, polyphone=True):
-    if jieba.dt.initialized is False:
-        jieba.default_logger.setLevel(50)  # CRITICAL
-        jieba.initialize()
-
-    final_text_list = []
-    custom_trans = str.maketrans(
-        {";": ",", "“": '"', "”": '"', "‘": "'", "’": "'"}
-    )  # add custom trans here, to address oov
-
-    def is_chinese(c):
-        return (
-            "\u3100" <= c <= "\u9fff"  # common chinese characters
-        )
-
-    for text in text_list:
-        char_list = []
-        text = text.translate(custom_trans)
-        for seg in jieba.cut(text):
-            seg_byte_len = len(bytes(seg, "UTF-8"))
-            if seg_byte_len == len(seg):  # if pure alphabets and symbols
-                if char_list and seg_byte_len > 1 and char_list[-1] not in " :'\"":
-                    char_list.append(" ")
-                char_list.extend(seg)
-            elif polyphone and seg_byte_len == 3 * len(seg):  # if pure east asian characters
-                seg_ = lazy_pinyin(seg, style=Style.TONE3, tone_sandhi=True)
-                for i, c in enumerate(seg):
-                    if is_chinese(c):
-                        char_list.append(" ")
-                    char_list.append(seg_[i])
-            else:  # if mixed characters, alphabets and symbols
-                for c in seg:
-                    if ord(c) < 256:
-                        char_list.extend(c)
-                    elif is_chinese(c):
-                        char_list.append(" ")
-                        char_list.extend(lazy_pinyin(c, style=Style.TONE3, tone_sandhi=True))
-                    else:
-                        char_list.append(c)
-        final_text_list.append(char_list)
-
-    return final_text_list
-
-
-def get_tokenizer(dataset_name, tokenizer: str = "custom"):
-    """
-    tokenizer   - "pinyin" do g2p for only chinese characters, need .txt vocab_file
-                - "char" for char-wise tokenizer, need .txt vocab_file
-                - "byte" for utf-8 tokenizer
-                - "custom" if you're directly passing in a path to the vocab.txt you want to use
-    vocab_size  - if use "pinyin", all available pinyin types, common alphabets (also those with accent) and symbols
-                - if use "char", derived from unfiltered character & symbol counts of custom dataset
-                - if use "byte", set to 256 (unicode byte range)
-    """
-    if tokenizer in ["pinyin", "char"]:
-        tokenizer_path = os.path.join(files("f5_tts").joinpath("../../data"), f"{dataset_name}_{tokenizer}/vocab.txt")
-        with open(tokenizer_path, "r", encoding="utf-8") as f:
-            vocab_char_map = {}
-            for i, char in enumerate(f):
-                vocab_char_map[char[:-1]] = i
-        vocab_size = len(vocab_char_map)
-        assert vocab_char_map[" "] == 0, "make sure space is of idx 0 in vocab.txt, cuz 0 is used for unknown char"
-
-    elif tokenizer == "byte":
-        vocab_char_map = None
-        vocab_size = 256
-
-    elif tokenizer == "custom":
-        with open(dataset_name, "r", encoding="utf-8") as f:
-            vocab_char_map = {}
-            for i, char in enumerate(f):
-                vocab_char_map[char[:-1]] = i
-        vocab_size = len(vocab_char_map)
-
-    return vocab_char_map, vocab_size
-
-def list_str_to_idx(
-    text: list[list[str]], # Expects list of lists of chars/pinyin
-    vocab_char_map: dict[str, int],
-    max_length: int,
-    padding_value=0, # Use 0 for padding index (which maps to space or unknown)
-):
-    outs = []
-    #unk_idx = vocab_char_map.get('<unk>', vocab_char_map.get(' ', 0)) # Use space if <unk> not present
-
-    for t in text:
-        # Map characters/pinyin, using unk_idx for unknown ones
-        list_idx_tensors = [vocab_char_map.get(c, 0) for c in t]
-        text_ids = np.asarray(list_idx_tensors, dtype=np.int32)
-
-        # Add 1 to all indices (making padding 1, original indices shifted)
-        text_ids = text_ids + 1 # Let's reconsider this, maybe padding with 0 is better if space is 0
-
-        # Pad sequence
-        pad_len = max_length - text_ids.shape[-1]
-        if pad_len < 0:
-            print(f"Warning: Truncating text sequence from {text_ids.shape[-1]} to {max_length}")
-            text_ids = text_ids[:max_length]
-            pad_len = 0
-
-        # Pad with the designated padding_value (e.g., 0)
-        text_ids = np.pad(text_ids, ((0, pad_len)), constant_values=padding_value)
-        outs.append(text_ids)
-
-    if not outs:
-      return np.array([], dtype=np.int32).reshape(0, max_length)
-
-    stacked_text_ids = np.stack(outs)
-    return stacked_text_ids
-
-
-def chunk_text(text, max_chars=135):
-    """
-    Splits the input text into chunks based on estimated character count,
-    respecting sentence boundaries where possible.
-    Max_chars is an estimate, actual byte length might vary.
-    """
-    chunks = []
-    current_chunk = ""
-    # More robust sentence splitting for English and Chinese
-    sentences = re.split(r'(?<=[.?!;；。？！])\s*', text)
-    # Filter out empty strings that can result from splitting
-    sentences = [s for s in sentences if s]
-
-    if not sentences:
-        if text: # Handle case where text has no sentence-ending punctuation
-            sentences = [text]
-        else:
-            return [] # No text, no chunks
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
-        # Estimate length (simple char count, pinyin will expand this later)
-        if len(current_chunk) + len(sentence) < max_chars:
-            current_chunk += sentence + " " # Add space between sentences
-        else:
-            # If adding the sentence exceeds max_chars
-            if current_chunk: # Add the previous chunk if it exists
-                chunks.append(current_chunk.strip())
-                current_chunk = sentence + " " # Start new chunk with current sentence
-            else: # Sentence itself is longer than max_chars
-                # Simple split for very long sentences (could be improved)
-                parts = [sentence[i:i+max_chars] for i in range(0, len(sentence), max_chars)]
-                chunks.extend(p.strip() + (" " if i < len(parts)-1 else "") for i, p in enumerate(parts))
-                current_chunk = "" # Reset current chunk
-
-    if current_chunk: # Add the last chunk
-        chunks.append(current_chunk.strip())
-
-    # Filter out any potential empty chunks again
-    chunks = [c for c in chunks if c]
-    return chunks
-
-
-def lens_to_mask(t: np.ndarray, length: int) -> np.ndarray:
-    # t: array of lengths, shape (b,)
-    # length: maximum sequence length
-    # returns: mask of shape (b, length)
-    if t.ndim == 0: # Handle single length input
-        t = t.reshape(1)
-    seq = np.arange(length)
-    mask = seq < t[:, None]  # Shape: (b, length)
-    return mask
-
 
 # --- Core Diffusion Loop Logic (Unchanged) ---
 
@@ -518,7 +374,7 @@ def generate_audio(
 
     # (Condition preparation - uses total_batch_items)
     # ... ref_audio_padded, cond calculation ...
-    ref_audio_padded = np.pad(ref_audio, (0, max(0, global_max_sequence_length * hop_length - ref_audio.shape[0])))
+    ref_audio_padded = np.pad(ref_audio, (0, max(0, global_max_sequence_length * hop_length + hop_length - ref_audio.shape[0])))
     ref_audio_padded = ref_audio_padded[np.newaxis, :]
     cond = jitted_get_mel(ref_audio_padded)
     cond_pad_len = global_max_sequence_length - cond.shape[1]
@@ -582,14 +438,14 @@ def generate_audio(
     rng_embed = jax.random.key(global_config.seed + 1) # Use a different seed
     rngs_embed = {'params': rng_embed, 'dropout': rng_embed}
 
-    text_embed_cond = global_jitted_text_encode_funcs[target_batch_size]({"params": global_text_encoder_params},
+    text_embed_cond = global_jitted_text_encode_funcs[target_batch_size](global_text_encoder_params,
                                           text_ids,
                                           text_decoder_segment_ids,
                                          rngs_embed)
 
     # Unconditional embeddings (zero text input)
-    text_embed_uncond = global_jitted_text_encode_funcs[target_batch_size]({"params": global_text_encoder_params},
-                                  np.zeros_like(text_ids),
+    text_embed_uncond = global_jitted_text_encode_funcs[target_batch_size](global_text_encoder_params,
+                                  jnp.zeros_like(text_ids),
                                   text_decoder_segment_ids, # Use zero mask too
                                   rngs_embed)
     t_end_embed = time.time()
@@ -660,7 +516,7 @@ def generate_audio(
     rngs_vocoder = {'params': vocoder_rng, 'dropout': vocoder_rng} # Vocos might need dropout rng
     # Vocoder expects (batch, seq_len, mel_bins)
     # Apply on device
-    audio_out_jax = global_jitted_vocos_apply_funcs[target_batch_size]({"params": global_vocos_params}, out_latents, rngs_vocoder)
+    audio_out_jax = global_jitted_vocos_apply_funcs[target_batch_size](global_vocos_params, out_latents, rngs_vocoder)
     audio_out_jax.block_until_ready() # Wait for vocoder to finish
 
     # Transfer *only the necessary data* to CPU
@@ -769,7 +625,7 @@ def setup_models_and_state(config):
     # =================================================
 
     # --- JIT Compile get_mel with Sharding ---
-    max_logging.log("Compiling get_mel with sharding...")
+    max_logging.log("Loading get_mel with sharding...")
     # Define the sharding for the input 'y'
     get_mel_in_shardings = (jax.sharding.NamedSharding(mesh, sharding_spec_get_mel_input),) # Tuple for positional args
     # Define the sharding for the output spectrogram
@@ -778,13 +634,27 @@ def setup_models_and_state(config):
 
     # Create the jitted function with sharding info
     # Static argnums remain the same as they refer to non-JAX array arguments
-    jitted_get_mel = jax.jit(
-        get_mel,
-        static_argnums=(1, 2, 3, 4, 5, 6, 8), # n_mels, n_fft, etc.
-        in_shardings=get_mel_in_shardings,
-        out_shardings=get_mel_out_shardings
-    )
-        # Warmup/Pre-compile get_mel
+    # jitted_get_mel = jax.jit(
+    #     get_mel,
+    #     static_argnums=(1, 2, 3, 4, 5, 6, 8), # n_mels, n_fft, etc.
+    #     in_shardings=get_mel_in_shardings,
+    #     out_shardings=get_mel_out_shardings
+    # )
+    def load_serialized_compiled(save_name):
+        with open(save_name, "rb") as f:
+            serialized_compiled = pickle.load(f)
+        return serialized_compiled
+
+    def get_train_input_output_trees(func, input_args, input_kwargs):
+        _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
+        out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
+        _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+        return in_tree_recreated, out_tree_recreated
+
+
+
+    # Warmup/Pre-compile get_mel
+    
     try:
         # Determine dummy audio length based on max sequence length and hop
         hop_length = 256 # Should match the default in get_mel
@@ -795,12 +665,18 @@ def setup_models_and_state(config):
         # Use a minimal batch size for compilation, as batch is not sharded here
         compile_batch_size = 1
         dummy_audio_shape = (compile_batch_size, dummy_audio_len)
-        dummy_audio = jnp.zeros(dummy_audio_shape, dtype=jnp.float32)
-        dummy_audio_sharded = jax.device_put(dummy_audio, get_mel_in_shardings[0])
+        #dummy_audio = jnp.zeros(dummy_audio_shape, dtype=jnp.float32)
+        #dummy_audio_sharded = jax.device_put(dummy_audio, get_mel_in_shardings[0])
+        serialized_compiled = load_serialized_compiled("/root/MaxTTS-Diffusion/get_mel_aot.pickle")
+        shaped_batch = jax.ShapeDtypeStruct(dummy_audio_shape,dtype=jnp.float32)
+        shaped_input_args = (shaped_batch,)
+        shaped_input_kwargs = {}
+        in_tree, out_tree = get_train_input_output_trees(get_mel, shaped_input_args, shaped_input_kwargs)
+        jitted_get_mel = deserialize_and_load(serialized_compiled, in_tree, out_tree)
 
-        max_logging.log(f"Warming up jitted_get_mel with dummy shape {dummy_audio_shape} sharded as {sharding_spec_get_mel_input}...")
-        _ = jitted_get_mel(dummy_audio_sharded).block_until_ready()
-        max_logging.log("jitted_get_mel successfully compiled and warmed up.")
+        # max_logging.log(f"Warming up jitted_get_mel with dummy shape {dummy_audio_shape} sharded as {sharding_spec_get_mel_input}...")
+        # _ = jitted_get_mel(dummy_audio_sharded).block_until_ready()
+        max_logging.log("get_mel AOT successfully loaded.")
         # You could inspect the shape and sharding of the output here if needed
         # test_output = jitted_get_mel(dummy_audio_sharded)
         # print("get_mel output shape:", test_output.shape)
@@ -892,25 +768,31 @@ def setup_models_and_state(config):
     # Assuming output might be replicated or used on host later
     text_encode_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim)
     def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
-        return text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
+        return text_encoder.apply({"params": params},text_ids,text_decoder_segment_ids,rngs=rngs)
     global_jitted_text_encode_funcs = {}
     # Compile it once
     for bucket in BUCKET_SIZES:
-        global_jitted_text_encode_funcs[bucket] = jax.jit(
-            wrap_text_encoder_apply,
-            in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
-            out_shardings=text_encode_out_shardings,
-            static_argnums=() # No static args in apply needed here
-        )
+        # global_jitted_text_encode_funcs[bucket] = jax.jit(
+        #     wrap_text_encoder_apply,
+        #     in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
+        #     out_shardings=text_encode_out_shardings,
+        #     static_argnums=() # No static args in apply needed here
+        # )
         dummy_text_ids_shape = (bucket, global_max_sequence_length)
-        dummy_text_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
-        dummy_text_seg_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
-        _ = global_jitted_text_encode_funcs[bucket]({"params": global_text_encoder_params},
-                                    dummy_text_ids,
-                                    dummy_text_seg_ids,
-                                    rngs_init)
+        serialized_compiled = load_serialized_compiled(f"/root/MaxTTS-Diffusion/text_encode_aot_{bucket}.pickle")
+        shaped_batch = (jax.ShapeDtypeStruct(dummy_text_ids_shape,dtype=jnp.int32),jax.ShapeDtypeStruct(dummy_text_ids_shape,dtype=jnp.int32))
+        shaped_input_args = (global_text_encoder_params,*shaped_batch,rngs_init)
+        shaped_input_kwargs = {}
+        in_tree, out_tree = get_train_input_output_trees(wrap_text_encoder_apply, shaped_input_args, shaped_input_kwargs)
+        global_jitted_text_encode_funcs[bucket] = deserialize_and_load(serialized_compiled, in_tree, out_tree)
+        #dummy_text_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
+        #dummy_text_seg_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
+        # _ = global_jitted_text_encode_funcs[bucket]({"params": global_text_encoder_params},
+        #                             dummy_text_ids,
+        #                             dummy_text_seg_ids,
+        #                             rngs_init)
 
-    max_logging.log("Text Encoder JIT compiled.")
+    max_logging.log("Text Encoder AOT loaded.")
 
 
     # --- Load Vocoder ---
@@ -941,24 +823,31 @@ def setup_models_and_state(config):
     # Output is (Batch, AudioLen), so shard batch dim
     vocos_apply_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq) # Assuming AudioLen is like Seq dim
     def wrap_vocos_apply(params,x,rngs):
-        return vocos_model.apply(params,x,rngs=rngs)
+        return vocos_model.apply({"params": params},x,rngs=rngs)
     global_jitted_vocos_apply_funcs = {}
     # Compile it once
     for bucket in BUCKET_SIZES:
-        global_jitted_vocos_apply_funcs[bucket] = jax.jit(
-            wrap_vocos_apply,
-            in_shardings=vocos_apply_in_shardings,
-            out_shardings=vocos_apply_out_shardings,
-            static_argnums=()
-        )
+        # global_jitted_vocos_apply_funcs[bucket] = jax.jit(
+        #     wrap_text_encoder_apply,
+        #     in_shardings=vocos_apply_in_shardings,
+        #     out_shardings=vocos_apply_out_shardings,
+        #     static_argnums=()
+        # )
         dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
-        dummy_latents_vocoder = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-        _ = global_jitted_vocos_apply_funcs[bucket]({"params": global_vocos_params}, dummy_latents_vocoder, rngs_voc_init)
-    max_logging.log("Vocoder JIT compiled.")
+        #dummy_latents_vocoder = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
+        serialized_compiled = load_serialized_compiled(f"/root/MaxTTS-Diffusion/vocos_apply_aot_{bucket}.pickle")
+        shaped_batch = (jax.ShapeDtypeStruct(dummy_latents_shape,dtype=jnp.int32),)
+        shaped_input_args = (global_vocos_params,*shaped_batch,rngs_init)
+        shaped_input_kwargs = {}
+        in_tree, out_tree = get_train_input_output_trees(wrap_vocos_apply, shaped_input_args, shaped_input_kwargs)
+        global_jitted_vocos_apply_funcs[bucket] = deserialize_and_load(serialized_compiled, in_tree, out_tree)
+
+        #_ = global_jitted_vocos_apply_funcs[bucket]({"params": global_vocos_params}, dummy_latents_vocoder, rngs_voc_init)
+    max_logging.log("Vocoder AOT loaded.")
 
 
     # --- Compile Inference Loop ---
-    max_logging.log("Compiling main inference loop...")
+    max_logging.log("Loading main inference loop...")
 
     # Define data sharding for inputs passed to p_run_inference during execution
     # Usually data-parallel along batch dimension
@@ -1007,33 +896,49 @@ def setup_models_and_state(config):
     global_p_run_inference_funcs = {}
     try:
         for bucket in BUCKET_SIZES:
-            global_p_run_inference_funcs[bucket] = jax.jit(
-                partial_run_inference,
-                static_argnums=(), # No static args in the partial itself anymore
-                in_shardings=in_shardings_inf,
-                out_shardings=out_shardings_inf,
-            )
+            # global_p_run_inference_funcs[bucket] = jax.jit(
+            #     partial_run_inference,
+            #     static_argnums=(), # No static args in the partial itself anymore
+            #     in_shardings=in_shardings_inf,
+            #     out_shardings=out_shardings_inf,
+            # )
             dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
             dummy_text_embed_shape = (bucket, global_max_sequence_length, 512)
             dummy_text_ids_shape = (bucket, global_max_sequence_length)
-            dummy_latents = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-            dummy_cond = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-            dummy_decoder_segment_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.float32)
-            dummy_text_embed = jnp.zeros(dummy_text_embed_shape, dtype=jnp.float32)
+            # dummy_latents = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
+            # dummy_cond = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
+            # dummy_decoder_segment_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.float32)
+            # dummy_text_embed = jnp.zeros(dummy_text_embed_shape, dtype=jnp.float32)
             dummy_c_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[:-1]
-            dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
-            _ = global_p_run_inference_funcs[bucket](
-                global_transformer_state,
-                dummy_latents,
-                dummy_cond,
-                dummy_decoder_segment_ids,
-                dummy_text_embed,
-                dummy_text_embed,
-                dummy_c_ts,
-                dummy_p_ts
-            )
+            #dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
 
-        max_logging.log("Inference loop JIT compiled.")
+            serialized_compiled = load_serialized_compiled(f"/root/MaxTTS-Diffusion/run_inference_aot_{bucket}.pickle")
+            shaped_batch = (
+                jax.ShapeDtypeStruct(dummy_latents_shape,dtype=jnp.float32),
+                jax.ShapeDtypeStruct(dummy_latents_shape,dtype=jnp.float32),
+                jax.ShapeDtypeStruct(dummy_text_ids_shape,dtype=jnp.int32),
+                jax.ShapeDtypeStruct(dummy_text_embed_shape,dtype=jnp.float32),
+                jax.ShapeDtypeStruct(dummy_text_embed_shape,dtype=jnp.float32),
+                jax.ShapeDtypeStruct(dummy_c_ts.shape,dtype=jnp.float32),
+                jax.ShapeDtypeStruct(dummy_c_ts.shape,dtype=jnp.float32),
+                )
+            shaped_input_args = (global_transformer_state,*shaped_batch)
+            shaped_input_kwargs = {}
+            in_tree, out_tree = get_train_input_output_trees(partial_run_inference, shaped_input_args, shaped_input_kwargs)
+            global_p_run_inference_funcs[bucket] = deserialize_and_load(serialized_compiled, in_tree, out_tree)
+
+            # _ = global_p_run_inference_funcs[bucket](
+            #     global_transformer_state,
+            #     dummy_latents,
+            #     dummy_cond,
+            #     dummy_decoder_segment_ids,
+            #     dummy_text_embed,
+            #     dummy_text_embed,
+            #     dummy_c_ts,
+            #     dummy_p_ts
+            # )
+
+        max_logging.log("Inference loop AOT loaded.")
     except Exception as e:
         max_logging.error(f"Failed to pre-compile inference loop: {e}")
 
@@ -1068,7 +973,7 @@ def main(argv: Sequence[str]) -> None:
         with gr.Row():
             with gr.Column():
                 ref_text_input = gr.Textbox(label="Reference Text", info="Text corresponding to the reference audio.", value=DEFAULT_REF_TEXT, lines=3)
-                ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
+                ref_audio_input = gr.Audio(value="/root/MaxTTS-Diffusion/test.mp3",label="Reference Audio", type="numpy")
                 gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
                 with gr.Row():
                     steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
@@ -1076,7 +981,7 @@ def main(argv: Sequence[str]) -> None:
                 with gr.Row():
                     speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
                     # === Add Sway Sampling Switch ===
-                    sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=False, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
+                    sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=True, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
                     # ==============================
                 submit_btn = gr.Button("Generate Audio", variant="primary")
 
@@ -1084,40 +989,40 @@ def main(argv: Sequence[str]) -> None:
                 audio_output = gr.Audio(label="Generated Audio", type="numpy")
 
 
-        # --- Examples (Updated) ---
-        gr.Examples(
-            examples=[
-                [
-                    "And maybe read maybe read that book you brought?",
-                    "test.mp3", # Replace path
-                    "This is a test of the emergency broadcast system.",
-                    50, 2.0, 1.0, False # Sway disabled
-                ],
-                [
-                    "I strongly believe that love is one of the only things we have in this world.",
-                    "test.mp3", # Replace path
-                    "你好，世界！这是一个测试。",
-                    50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "The quick brown fox jumps over the lazy dog.",
-                    60, 3.0, 0.8, False # Sway disabled
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "Sway sampling can sometimes alter the generation dynamics.",
-                    50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
-                ],
-            ],
-            # Update inputs list order
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-            outputs=[audio_output],
-            fn=generate_audio,
-            cache_examples=False,
-        )
+        # # --- Examples (Updated) ---
+        # gr.Examples(
+        #     examples=[
+        #         [
+        #             "And maybe read maybe read that book you brought?",
+        #             "test.mp3", # Replace path
+        #             "This is a test of the emergency broadcast system.",
+        #             50, 2.0, 1.0, False # Sway disabled
+        #         ],
+        #         [
+        #             "I strongly believe that love is one of the only things we have in this world.",
+        #             "test.mp3", # Replace path
+        #             "你好，世界！这是一个测试。",
+        #             50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
+        #         ],
+        #          [
+        #             DEFAULT_REF_TEXT,
+        #             "test.mp3", # Replace path
+        #             "The quick brown fox jumps over the lazy dog.",
+        #             60, 3.0, 0.8, False # Sway disabled
+        #         ],
+        #          [
+        #             DEFAULT_REF_TEXT,
+        #             "test.mp3", # Replace path
+        #             "Sway sampling can sometimes alter the generation dynamics.",
+        #             50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
+        #         ],
+        #     ],
+        #     # Update inputs list order
+        #     inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
+        #     outputs=[audio_output],
+        #     fn=generate_audio,
+        #     cache_examples=False,
+        # )
 
         # Update button click inputs list order
         submit_btn.click(
@@ -1154,6 +1059,6 @@ if __name__ == "__main__":
   # data_sharding: ['data'] # Sharding axis name for batch dim
   # logical_axis_rules: [['batch', 'data']] # Example rule
   # gradio_share: False # Set to True to create public link (use with caution)
-  jax.config.update("jax_explain_cache_misses", True)
-  jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
+  #jax.config.update("jax_explain_cache_misses", True)
+  #jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
   app.run(main)

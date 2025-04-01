@@ -49,8 +49,7 @@ MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation com
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
-#BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
-BUCKET_SIZES = sorted([4, 8])
+BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
 MAX_CHUNKS = BUCKET_SIZES[-1]
 # ==========================
 
@@ -654,7 +653,7 @@ def setup_models_and_state(config):
             dummy_text_ids_shape = (bucket, global_max_sequence_length)
             dummy_latents = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
             dummy_cond = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-            dummy_decoder_segment_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.float32)
+            dummy_decoder_segment_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
             dummy_text_embed = jnp.zeros(dummy_text_embed_shape, dtype=jnp.float32)
             dummy_c_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[:-1]
             dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
