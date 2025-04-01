@@ -1,3 +1,4 @@
+import pickle
 import gradio as gr # Import Gradio
 from typing import Callable, List, Union, Sequence, Tuple
 from absl import app
@@ -38,6 +39,7 @@ import jax.experimental.compilation_cache
 from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
 import soundfile as sf
 import io
+from jax.experimental.serialize_executable import serialize
 
 # --- Configuration & Constants ---
 #jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
@@ -73,7 +75,12 @@ global_max_sequence_length = None # Will be set during setup
 #global_batch_size = None # Will be set during setup
 
 # --- Utility Functions (Mostly unchanged, slight modifications) ---
-
+def save_compiled(compiled, save_name):
+  """Serialize and save the compiled function."""
+  serialized, _, _ = serialize(compiled)
+  with open(save_name, "wb") as f:
+    pickle.dump(serialized, f)
+    
 def dynamic_range_compression_jax(x, C=1, clip_val=1e-7):
     return jnp.log(jnp.clip(x, min=clip_val) * C)
 
@@ -339,383 +346,6 @@ def run_inference(
 
     return latents_final
 
-# --- Gradio Inference Function ---
-
-def generate_audio(
-    ref_text: str,
-    gen_text: str,
-    ref_audio_input: Tuple[int, np.ndarray] | str | None,
-    num_inference_steps: int = 50,
-    guidance_scale: float = 2.0,
-    speed_factor: float = 1.0, # <-- Add speed factor parameter
-    use_sway_sampling: bool = False, # <-- Add sway sampling parameter
-    progress=gr.Progress(track_tqdm=True)
-) -> Tuple[int, np.ndarray]:
-    """
-    Main function called by Gradio interface.
-    """
-    global cfg_strength
-    cfg_strength = guidance_scale # Update global cfg strength from Gradio input
-
-    t_start_total = time.time()
-    max_logging.log(f"Starting audio generation... Steps: {num_inference_steps}, CFG: {guidance_scale}, Speed: {speed_factor}, Sway: {use_sway_sampling}")
-
-    # --- Input Validation and Loading ---
-    if not ref_text:
-        ref_text = DEFAULT_REF_TEXT
-        max_logging.log(f"Using default reference text: '{ref_text}'")
-        # raise gr.Error("Reference text cannot be empty.")
-    if not gen_text:
-        raise gr.Error("Generation text cannot be empty.")
-    if ref_audio_input is None:
-        raise gr.Error("Reference audio is required.")
-
-    # Load reference audio
-    if isinstance(ref_audio_input, str): # File path
-        try:
-            ref_audio, ref_sr = librosa.load(ref_audio_input, sr=TARGET_SR, mono=True)
-            max_logging.log(f"Loaded reference audio from path: {ref_audio_input}")
-        except Exception as e:
-            raise gr.Error(f"Failed to load reference audio: {e}")
-    elif isinstance(ref_audio_input, tuple): # Gradio numpy format (sr, data)
-        ref_sr, ref_audio = ref_audio_input
-        if ref_sr != TARGET_SR:
-            max_logging.log(f"Resampling reference audio from {ref_sr} Hz to {TARGET_SR} Hz.")
-            ref_audio = librosa.resample(ref_audio.astype(np.float32)/ 32768.0, orig_sr=ref_sr, target_sr=TARGET_SR)
-        if ref_audio.ndim > 1:
-             ref_audio = np.mean(ref_audio, axis=1) # Ensure mono
-        max_logging.log("Loaded reference audio from Gradio input.")
-    else:
-        raise gr.Error("Invalid reference audio input format.")
-
-    if ref_audio.size == 0:
-         raise gr.Error("Reference audio is empty after loading.")
-
-    # --- Preprocessing ---
-    t_start_preprocess = time.time()
-    max_logging.log("Preprocessing text and audio...")
-
-    # Ensure reference text ends with space if last char is ASCII
-    if ref_text and len(ref_text[-1].encode("utf-8")) == 1:
-        ref_text = ref_text + " "
-
-    # Estimate character count per second from reference
-    ref_duration_sec = len(ref_audio) / TARGET_SR
-    if ref_duration_sec < 0.1:
-        raise gr.Error("Reference audio is too short (must be at least 0.1 seconds).")
-
-    # Calculate max characters for chunking based on reference speech rate
-    # Add a buffer (e.g., 20%) to handle faster speech or estimation errors
-    chars_per_sec_ref = len(ref_text.encode("utf-8")) / ref_duration_sec
-    # Estimate max duration for generated chunks based on available sequence length
-    max_gen_duration_sec = MAX_DURATION_SECS - ref_duration_sec
-    if max_gen_duration_sec <= 0:
-        raise gr.Error(f"Reference audio duration ({ref_duration_sec:.1f}s) exceeds max allowed duration ({MAX_DURATION_SECS}s).")
-
-    # Estimate max characters per chunk, ensuring it's positive
-    # Use a slightly higher estimate chars_per_sec to be conservative
-    estimated_max_chars = max(10, int(chars_per_sec_ref * max_gen_duration_sec * 0.8)) # 80% buffer
-    max_logging.log(f"Reference: {ref_duration_sec:.1f}s, {len(ref_text)} chars. Estimated max chars/chunk: {estimated_max_chars}")
-
-    gen_text_batches = chunk_text(gen_text, max_chars=estimated_max_chars)
-    num_chunks = len(gen_text_batches)
-    max_logging.log(f"Split generation text into {num_chunks} chunks.")
-
-    # === NEW: Batch Size Bucketing Logic ===
-    if num_chunks == 0:
-         raise gr.Error("Text processing resulted in zero valid chunks. Try different text.")
-    if num_chunks > MAX_CHUNKS:
-        raise gr.Error(f"Too many text chunks ({num_chunks}). Maximum allowed is {MAX_CHUNKS}. Please shorten the 'Text to Generate'.")
-
-
-    max_logging.log(f"Split generation text into {len(gen_text_batches)} chunks.")
-
-    # === NEW: Batch Size Bucketing Logic ===
-    if num_chunks == 0:
-         raise gr.Error("Text processing resulted in zero valid chunks. Try different text.")
-    if num_chunks > MAX_CHUNKS:
-        raise gr.Error(f"Too many text chunks ({num_chunks}). Maximum allowed is {MAX_CHUNKS}. Please shorten the 'Text to Generate'.")
-
-    # Find the target batch size from buckets
-    target_batch_size = MAX_CHUNKS # Initialize just in case
-    for bucket in BUCKET_SIZES:
-        if num_chunks <= bucket:
-            target_batch_size = bucket
-            break
-    
-    padded_items_count = target_batch_size - num_chunks
-    total_batch_items = target_batch_size # This is the final batch dimension size
-
-    max_logging.log(f"Processing {num_chunks} chunks. Padding to nearest bucket size: {target_batch_size} (adding {padded_items_count} padding items).")
-    # === End of Bucketing Logic ===
-
-    batched_text_list_combined = []
-    batched_duration_frames = [] # Duration in mel frames (samples // hop_length)
-    hop_length = 256 # Must match get_mel
-    ref_audio_len_frames = ref_audio.shape[-1] // hop_length + 1
-
-    # Limit reference audio / text to avoid exceeding max sequence length early
-    max_ref_frames = int(global_max_sequence_length * 0.6) # Allow ref max 60% of total length
-    if ref_audio_len_frames > max_ref_frames:
-        max_logging.log(f"Warning: Truncating reference audio from {ref_audio_len_frames} to {max_ref_frames} frames.")
-        ref_audio_len_frames = max_ref_frames
-        ref_audio = ref_audio[:ref_audio_len_frames * hop_length]
-        # Ideally, truncate ref_text too, but estimating byte length -> char mapping is tricky.
-        # Simple approximation: truncate proportionally.
-        original_ref_text_len = len(ref_text)
-        ref_text = ref_text[:int(original_ref_text_len * (max_ref_frames / (ref_audio.shape[-1] // hop_length + 1)))]
-        if ref_text and len(ref_text[-1].encode("utf-8")) == 1: # Ensure space again if truncated
-             ref_text += " "
-        max_logging.log(f"Truncated reference text length: {len(ref_text)}")
-
-
-    if ref_audio_len_frames >= global_max_sequence_length:
-         raise gr.Error(f"Reference audio ({ref_audio_len_frames} frames) already exceeds max sequence length ({global_max_sequence_length}). Please use shorter audio.")
-
-
-
-     # === MODIFIED Duration Estimation Loop ===
-    for i, single_gen_text in enumerate(gen_text_batches):
-        text_combined = ref_text + single_gen_text
-        batched_text_list_combined.append(text_combined)
-
-        # Estimate duration: ref_frames + proportional based on text length estimate
-        ref_text_byte_len = len(ref_text.encode('utf-8'))
-        gen_text_byte_len = len(single_gen_text.encode('utf-8'))
-
-        # Avoid division by zero if ref_text is empty (shouldn't happen with checks)
-        if ref_text_byte_len > 0:
-             estimated_gen_frames = int(ref_audio_len_frames / ref_text_byte_len * gen_text_byte_len / speed_factor)
-        else:
-             # Fallback: estimate based on average chars/sec if ref_text was empty
-             avg_chars_per_sec = 5 * speed_factor # A rough guess
-             estimated_gen_frames = int(gen_text_byte_len * (TARGET_SR / hop_length) / avg_chars_per_sec) if avg_chars_per_sec > 0 else 50 # Avoid div by zero
-
-        estimated_gen_frames = max(0, estimated_gen_frames)
-        # Total duration: ref + estimated gen
-        duration_frames = ref_audio_len_frames + estimated_gen_frames
-        # Clamp duration to max sequence length
-        duration_frames = min(global_max_sequence_length, duration_frames)
-        # Ensure duration is at least the length of the reference audio part
-        duration_frames = max(ref_audio_len_frames + 1, duration_frames) # Need at least one frame for generation
-
-        batched_duration_frames.append(duration_frames)
-        max_logging.log(f"Chunk {i+1}/{len(gen_text_batches)}: Combined text len: {len(text_combined)}, Estimated total frames: {duration_frames}")
-
-
-    # Convert text to pinyin/chars list
-    # This step can be slow, especially for long texts
-    pinyin_start_time = time.time()
-    final_text_list_pinyin = convert_char_to_pinyin(batched_text_list_combined)
-    max_logging.log(f"Pinyin conversion took {time.time() - pinyin_start_time:.2f}s")
-
-
-    # === Apply Padding to text_ids ===
-    # Tokenize the *actual* chunks first
-    text_ids_unpadded = list_str_to_idx(final_text_list_pinyin, global_vocab_char_map, max_length=global_max_sequence_length)
-    # Now pad to the target_batch_size
-    text_ids = jnp.pad(text_ids_unpadded, ((0, padded_items_count), (0, 0)), constant_values=0)
-    # ================================
-
-    # (Condition preparation - uses total_batch_items)
-    # ... ref_audio_padded, cond calculation ...
-    ref_audio_padded = jnp.pad(ref_audio, (0, max(0, global_max_sequence_length * hop_length - ref_audio.shape[0])))
-    ref_audio_padded = ref_audio_padded[np.newaxis, :]
-    cond = jitted_get_mel(ref_audio_padded)
-    cond_pad_len = global_max_sequence_length - cond.shape[1]
-    if cond_pad_len > 0:
-        cond = jnp.pad(cond, ((0,0), (0, cond_pad_len), (0,0)))
-    elif cond_pad_len < 0:
-        cond = cond[:, :global_max_sequence_length, :]
-    # Broadcast condition to the final target batch size
-    cond = jnp.repeat(cond, total_batch_items, axis=0)
-
-    # === Apply Padding to duration_frames_arr ===
-    # Use a safe padding value (e.g., min possible duration) for padding items
-    safe_padding_duration = ref_audio_len_frames + 1
-    padded_durations = batched_duration_frames + [safe_padding_duration] * padded_items_count
-    duration_frames_arr = jnp.array(padded_durations, dtype=jnp.int32)
-    # ==========================================
-
-    # (Mask Calculation - uses total_batch_items and padded arrays)
-    # Create ref_len array for the total batch size
-    ref_len_frames_arr = jnp.array([ref_audio_len_frames] * total_batch_items, dtype=jnp.int32)
-
-    # Ensure padded duration array elements don't exceed max length and are >= ref length + 1
-    duration_frames_arr = jnp.minimum(duration_frames_arr, global_max_sequence_length)
-    duration_frames_arr = jnp.maximum(duration_frames_arr, ref_len_frames_arr + 1)
-
-    # Calculate text lengths based on the *padded* text_ids
-    text_lens = jnp.minimum((text_ids != 0).sum(axis=-1), global_max_sequence_length)
-
-
-    # Calculate final duration using padded arrays
-    effective_min_len = jnp.maximum(text_lens, ref_len_frames_arr) + 1
-    duration_final = jnp.maximum(effective_min_len, duration_frames_arr)
-    duration_final = jnp.minimum(duration_final, global_max_sequence_length) # Final cap
-
-    # Create masks using final calculated lengths
-    cond_mask = lens_to_mask(ref_len_frames_arr, length=global_max_sequence_length) # Mask for reference audio part
-    decoder_mask = lens_to_mask(duration_final, length=global_max_sequence_length)  # Mask for the whole sequence generation
-
-    # Prepare segment IDs
-    text_decoder_segment_ids = (text_ids != 0).astype(jnp.int32) # Mask based on text tokens
-    decoder_segment_ids = decoder_mask.astype(jnp.int32)        # Mask based on calculated total duration
-
-    # Apply conditional mask (uses broadcasted cond and cond_mask)
-    step_cond = jnp.where( cond_mask[..., jnp.newaxis], cond, jnp.zeros_like(cond) )
-
-    # --- Shard data ---
-    step_cond = jax.device_put(step_cond, global_data_sharding)
-    text_ids = jax.device_put(text_ids, global_data_sharding)
-    decoder_segment_ids = jax.device_put(decoder_segment_ids, global_data_sharding)
-    text_decoder_segment_ids = jax.device_put(text_decoder_segment_ids, global_data_sharding)
-    cond_mask_sharded = jax.device_put(cond_mask, global_data_sharding) # Shard this too for final masking
-
-
-    t_end_preprocess = time.time()
-    max_logging.log(f"Preprocessing finished in {t_end_preprocess - t_start_preprocess:.2f}s.")
-    #get_memory_allocations()
-
-    # --- Text Embedding ---
-    t_start_embed = time.time()
-    max_logging.log("Generating text embeddings...")
-    rng_embed = jax.random.key(global_config.seed + 1) # Use a different seed
-    rngs_embed = {'params': rng_embed, 'dropout': rng_embed}
-
-    text_embed_cond = global_jitted_text_encode_funcs[target_batch_size]({"params": global_text_encoder_params},
-                                          text_ids,
-                                          text_decoder_segment_ids,
-                                         rngs_embed)
-
-    # Unconditional embeddings (zero text input)
-    text_embed_uncond = global_jitted_text_encode_funcs[target_batch_size]({"params": global_text_encoder_params},
-                                  jnp.zeros_like(text_ids),
-                                  text_decoder_segment_ids, # Use zero mask too
-                                  rngs_embed)
-    t_end_embed = time.time()
-    max_logging.log(f"Text embedding generation took {t_end_embed - t_start_embed:.2f}s.")
-    #get_memory_allocations()
-
-
-    # --- Diffusion Sampling ---
-    t_start_diffusion = time.time()
-    max_logging.log(f"Starting diffusion sampling with {num_inference_steps} steps...")
-
-    # Initial noise (latents)
-    latents_shape = (total_batch_items, global_max_sequence_length, 100) # Get latent_dim from model
-    latents_rng = jax.random.key(global_config.seed + 2)
-    latents = jax.random.normal(latents_rng, latents_shape, dtype=jnp.float32)
-    latents = jax.device_put(latents, global_data_sharding)
-
-    # === MODIFIED Timestep Calculation ===
-    t_start = 0.0
-    timesteps = jnp.linspace(t_start, 1.0, num_inference_steps + 1).astype(jnp.float32)
-
-    if use_sway_sampling:
-        # Get coefficient from config, default to 0.0 if not found
-        sway_coef = global_config.sway_sampling_coef
-        if sway_coef is not None:
-            max_logging.log(f"Applying Sway Sampling with coefficient: {sway_coef}")
-            timesteps = timesteps + sway_coef * (jnp.cos(jnp.pi / 2 * timesteps) - 1 + timesteps)
-            # Clip timesteps to ensure they remain in [0, 1] after adjustment
-            timesteps = jnp.clip(timesteps, 0.0, 1.0)
-        else:
-            max_logging.log("Sway sampling enabled but coefficient is 0 or missing in config. Skipping.")
-    else:
-        max_logging.log("Sway sampling disabled.")
-
-    c_ts = timesteps[:-1] # Current timesteps
-    p_ts = timesteps[1:]  # Previous timesteps (sigma_{t-1}, sigma_t in DDIM terms if reversed)
-    # === End of Modified Timestep Calculation ===
-
-    # Run inference loop (using pre-compiled partial function)
-    y_final_latents = global_p_run_inference_funcs[target_batch_size](
-        global_transformer_state, # Pass state
-        latents,
-        step_cond,
-        decoder_segment_ids,
-        text_embed_cond,
-        text_embed_uncond,
-        c_ts,
-        p_ts
-    )
-
-    # Ensure computation happens
-    y_final_latents.block_until_ready()
-    t_end_diffusion = time.time()
-    max_logging.log(f"Diffusion sampling finished in {t_end_diffusion - t_start_diffusion:.2f}s.")
-    #get_memory_allocations()
-
-
-    # --- Postprocessing (Vocoder) ---
-    t_start_post = time.time()
-    max_logging.log("Applying Vocoder...")
-
-    # Combine condition and generated parts
-    # Use sharded cond_mask here
-    out_latents = jnp.where(cond_mask_sharded[..., jnp.newaxis], cond, y_final_latents)
-
-    # Apply Vocoder
-    vocoder_rng = jax.random.key(global_config.seed + 3)
-    rngs_vocoder = {'params': vocoder_rng, 'dropout': vocoder_rng} # Vocos might need dropout rng
-    # Vocoder expects (batch, seq_len, mel_bins)
-    # Apply on device
-    audio_out_jax = global_jitted_vocos_apply_funcs[target_batch_size]({"params": global_vocos_params}, out_latents, rngs_vocoder)
-    audio_out_jax.block_until_ready() # Wait for vocoder to finish
-
-    # Transfer *only the necessary data* to CPU
-    max_logging.log("Transferring generated audio to CPU...")
-    # Get lengths needed on CPU *before* slicing on device if possible
-    # Use the originally calculated durations (before padding)
-    cpu_durations = np.array(batched_duration_frames)
-    cpu_ref_len_frames = ref_audio_len_frames # Use the (potentially truncated) ref length
-
-    # Transfer all generated audio data for the valid chunks
-    audio_out_cpu = np.asarray(audio_out_jax[:num_chunks])
-
-    t_end_post = time.time()
-    max_logging.log(f"Vocoder and transfer took {t_end_post - t_start_post:.2f}s.")
-    #get_memory_allocations()
-
-
-    # --- Final Audio Stitching ---
-    t_start_stitch = time.time()
-    max_logging.log("Stitching audio chunks...")
-    final_audio_segments = []
-
-    # Convert frame lengths to sample lengths
-    ref_len_samples = cpu_ref_len_frames * hop_length
-
-    for i in range(num_chunks):
-        # Get the duration for this specific chunk in frames
-        current_duration_frames = cpu_durations[i]
-        # Convert duration to samples
-        current_duration_samples = current_duration_frames * hop_length
-
-        # Extract the generated part for this chunk
-        # Slice from end of reference audio up to the total duration for this chunk
-        # audio_out_cpu[i] has shape (seq_len * hop_length,) approx
-        generated_part = audio_out_cpu[i, ref_len_samples:current_duration_samples]
-        final_audio_segments.append(generated_part)
-
-    # Concatenate all generated segments
-    final_audio = np.concatenate(final_audio_segments) if final_audio_segments else np.array([], dtype=np.float32)
-
-    t_end_stitch = time.time()
-    max_logging.log(f"Audio stitching took {t_end_stitch - t_start_stitch:.2f}s.")
-
-    t_end_total = time.time()
-    total_duration = t_end_total - t_start_total
-    generated_audio_duration = len(final_audio) / TARGET_SR
-    max_logging.log(f"Total generation time: {total_duration:.2f}s for {generated_audio_duration:.2f}s of audio.")
-    if generated_audio_duration > 0:
-        rtf = total_duration / generated_audio_duration
-        max_logging.log(f"Real-Time Factor (RTF): {rtf:.3f}")
-
-
-    # Return in Gradio audio format
-    return (TARGET_SR, final_audio)
 
 
 # --- Setup Function ---
@@ -800,8 +430,9 @@ def setup_models_and_state(config):
         dummy_audio_sharded = jax.device_put(dummy_audio, get_mel_in_shardings[0])
 
         max_logging.log(f"Warming up jitted_get_mel with dummy shape {dummy_audio_shape} sharded as {sharding_spec_get_mel_input}...")
-        _ = jitted_get_mel(dummy_audio_sharded).block_until_ready()
-        max_logging.log("jitted_get_mel successfully compiled and warmed up.")
+        compiled_get_mel = jitted_get_mel.lower(dummy_audio_sharded).compile()
+        save_compiled(compiled_get_mel, "get_mel_aot.pickle")
+        max_logging.log("jitted_get_mel successfully AOT compiled.")
         # You could inspect the shape and sharding of the output here if needed
         # test_output = jitted_get_mel(dummy_audio_sharded)
         # print("get_mel output shape:", test_output.shape)
@@ -906,12 +537,13 @@ def setup_models_and_state(config):
         dummy_text_ids_shape = (bucket, global_max_sequence_length)
         dummy_text_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
         dummy_text_seg_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
-        _ = global_jitted_text_encode_funcs[bucket]({"params": global_text_encoder_params},
+        text_encode_compiled = global_jitted_text_encode_funcs[bucket].lower(
+        {"params": global_text_encoder_params},
                                     dummy_text_ids,
                                     dummy_text_seg_ids,
-                                    rngs_init)
-
-    max_logging.log("Text Encoder JIT compiled.")
+                                    rngs_init).compile()
+        save_compiled(text_encode_compiled, f"text_encode_aot_{bucket}.pickle")
+    max_logging.log("Text Encoder AOT compiled.")
 
 
     # --- Load Vocoder ---
@@ -954,8 +586,11 @@ def setup_models_and_state(config):
         )
         dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
         dummy_latents_vocoder = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-        _ = global_jitted_vocos_apply_funcs[bucket]({"params": global_vocos_params}, dummy_latents_vocoder, rngs_voc_init)
-    max_logging.log("Vocoder JIT compiled.")
+        vocos_apply_compiled = global_jitted_vocos_apply_funcs[bucket].lower({"params": global_vocos_params}, dummy_latents_vocoder, rngs_voc_init).compile()
+        save_compiled(vocos_apply_compiled, f"vocos_apply_aot_{bucket}.pickle")
+        max_logging.log(f"Batch Size {bucket} Vocos Cost analysis: {vocos_apply_compiled.cost_analysis()}")
+        max_logging.log(f"Batch Size {bucket} Vocos Memory analysis: {vocos_apply_compiled.memory_analysis()}")
+    max_logging.log("Vocoder AOT compiled.")
 
 
     # --- Compile Inference Loop ---
@@ -1023,7 +658,7 @@ def setup_models_and_state(config):
             dummy_text_embed = jnp.zeros(dummy_text_embed_shape, dtype=jnp.float32)
             dummy_c_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[:-1]
             dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
-            _ = global_p_run_inference_funcs[bucket](
+            run_inference_compiled = global_p_run_inference_funcs[bucket].lower(
                 global_transformer_state,
                 dummy_latents,
                 dummy_cond,
@@ -1032,7 +667,10 @@ def setup_models_and_state(config):
                 dummy_text_embed,
                 dummy_c_ts,
                 dummy_p_ts
-            )
+            ).compile()
+            save_compiled(run_inference_compiled, f"run_inference_aot_{bucket}.pickle")
+            max_logging.log(f"Batch Size {bucket} Inference Cost analysis: {run_inference_compiled.cost_analysis()}")
+            max_logging.log(f"Batch Size {bucket} Inference Memory analysis: {run_inference_compiled.memory_analysis()}")
 
         max_logging.log("Inference loop JIT compiled.")
     except Exception as e:
@@ -1055,82 +693,6 @@ def main(argv: Sequence[str]) -> None:
         max_logging.error(f"Fatal error during setup: {e}", exc_info=True)
         print(f"\n\nERROR DURING SETUP: {e}\nCannot launch Gradio app.")
         return # Exit if setup fails
-
-    # --- Create Gradio Interface ---
-    css = """
-    .audio-container { display: flex; justify-content: center; align-items: center; }
-    .transcription-container { margin-top: 10px; }
-    footer {visibility: hidden}
-    """
-    with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
-        gr.Markdown("## F5 Text-to-Speech Synthesis")
-        gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
-
-        with gr.Row():
-            with gr.Column():
-                ref_text_input = gr.Textbox(label="Reference Text", info="Text corresponding to the reference audio.", value=DEFAULT_REF_TEXT, lines=3)
-                ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
-                gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
-                with gr.Row():
-                    steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
-                    cfg_slider = gr.Slider(minimum=1.0, maximum=10.0, value=2.0, step=0.1, label="Guidance Scale (CFG)", info="Higher values follow prompts more strictly but can reduce diversity.")
-                with gr.Row():
-                    speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
-                    # === Add Sway Sampling Switch ===
-                    sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=False, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
-                    # ==============================
-                submit_btn = gr.Button("Generate Audio", variant="primary")
-
-            with gr.Column(scale=1): # Make right column narrower
-                audio_output = gr.Audio(label="Generated Audio", type="numpy")
-
-
-        # --- Examples (Updated) ---
-        gr.Examples(
-            examples=[
-                [
-                    "And maybe read maybe read that book you brought?",
-                    "test.mp3", # Replace path
-                    "This is a test of the emergency broadcast system.",
-                    50, 2.0, 1.0, False # Sway disabled
-                ],
-                [
-                    "I strongly believe that love is one of the only things we have in this world.",
-                    "test.mp3", # Replace path
-                    "你好，世界！这是一个测试。",
-                    50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "The quick brown fox jumps over the lazy dog.",
-                    60, 3.0, 0.8, False # Sway disabled
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "Sway sampling can sometimes alter the generation dynamics.",
-                    50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
-                ],
-            ],
-            # Update inputs list order
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-            outputs=[audio_output],
-            fn=generate_audio,
-            cache_examples=False,
-        )
-
-        # Update button click inputs list order
-        submit_btn.click(
-            fn=generate_audio,
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-            outputs=[audio_output],
-        )
-
-    # Launch the Gradio app
-    max_logging.log("Launching Gradio interface...")
-    iface.launch(share=True, server_name="0.0.0.0") # Allow external access if needed
-
 
 if __name__ == "__main__":
   # Make sure to configure paths and other settings in your pyconfig file (e.g., config.yaml)

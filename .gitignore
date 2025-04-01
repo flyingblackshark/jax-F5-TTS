@@ -179,3 +179,5 @@ wandb
 output.wav
 jax_cache
 .gradio/certificate.pem
+*.pickle
+.gradio
