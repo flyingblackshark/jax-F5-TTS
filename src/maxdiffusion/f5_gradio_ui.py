@@ -518,7 +518,7 @@ def generate_audio(
 
     # (Condition preparation - uses total_batch_items)
     # ... ref_audio_padded, cond calculation ...
-    ref_audio_padded = np.pad(ref_audio, (0, max(0, global_max_sequence_length * hop_length - ref_audio.shape[0])))
+    ref_audio_padded = np.pad(ref_audio, (0, max(0, global_max_sequence_length * hop_length + hop_length - ref_audio.shape[0])))
     ref_audio_padded = ref_audio_padded[np.newaxis, :]
     cond = jitted_get_mel(ref_audio_padded)
     cond_pad_len = global_max_sequence_length - cond.shape[1]
