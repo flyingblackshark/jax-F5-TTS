@@ -200,7 +200,7 @@ def generate_audio(
     ref_text: str,
     gen_text: str,
     ref_audio_input: Tuple[int, np.ndarray] | str | None,
-    num_inference_steps: int = 50,
+    #num_inference_steps: int = 50,
     guidance_scale: float = 2.0,
     speed_factor: float = 1.0, # <-- Add speed factor parameter
     use_sway_sampling: bool = False, # <-- Add sway sampling parameter
@@ -213,7 +213,7 @@ def generate_audio(
     cfg_strength = guidance_scale # Update global cfg strength from Gradio input
 
     t_start_total = time.time()
-    max_logging.log(f"Starting audio generation... Steps: {num_inference_steps}, CFG: {guidance_scale}, Speed: {speed_factor}, Sway: {use_sway_sampling}")
+    max_logging.log(f"Starting audio generation... Steps: {global_config.num_inference_steps}, CFG: {guidance_scale}, Speed: {speed_factor}, Sway: {use_sway_sampling}")
 
     # --- Input Validation and Loading ---
     if not ref_text:
@@ -455,7 +455,7 @@ def generate_audio(
 
     # --- Diffusion Sampling ---
     t_start_diffusion = time.time()
-    max_logging.log(f"Starting diffusion sampling with {num_inference_steps} steps...")
+    max_logging.log(f"Starting diffusion sampling with {global_config.num_inference_steps} steps...")
 
     # Initial noise (latents)
     latents_shape = (total_batch_items, global_max_sequence_length, 100) # Get latent_dim from model
@@ -465,7 +465,7 @@ def generate_audio(
 
     # === MODIFIED Timestep Calculation ===
     t_start = 0.0
-    timesteps = np.linspace(t_start, 1.0, num_inference_steps + 1).astype(np.float32)
+    timesteps = np.linspace(t_start, 1.0, global_config.num_inference_steps + 1).astype(np.float32)
 
     if use_sway_sampling:
         # Get coefficient from config, default to 0.0 if not found
@@ -976,7 +976,7 @@ def main(argv: Sequence[str]) -> None:
                 ref_audio_input = gr.Audio(value="/root/MaxTTS-Diffusion/test.mp3",label="Reference Audio", type="numpy")
                 gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
                 with gr.Row():
-                    steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
+                    #steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
                     cfg_slider = gr.Slider(minimum=1.0, maximum=10.0, value=2.0, step=0.1, label="Guidance Scale (CFG)", info="Higher values follow prompts more strictly but can reduce diversity.")
                 with gr.Row():
                     speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
@@ -1027,7 +1027,7 @@ def main(argv: Sequence[str]) -> None:
         # Update button click inputs list order
         submit_btn.click(
             fn=generate_audio,
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
+            inputs=[ref_text_input, gen_text_input, ref_audio_input, cfg_slider, speed_slider, sway_sampling_switch],
             outputs=[audio_output],
         )
 

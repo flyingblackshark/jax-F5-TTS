@@ -46,7 +46,7 @@ from jax.experimental.serialize_executable import serialize
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
 MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
-MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
+
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
 BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
@@ -671,7 +671,7 @@ def setup_models_and_state(config):
             max_logging.log(f"Batch Size {bucket} Inference Cost analysis: {run_inference_compiled.cost_analysis()}")
             max_logging.log(f"Batch Size {bucket} Inference Memory analysis: {run_inference_compiled.memory_analysis()}")
 
-        max_logging.log("Inference loop JIT compiled.")
+        max_logging.log("Inference loop AOT compiled.")
     except Exception as e:
         max_logging.error(f"Failed to pre-compile inference loop: {e}")
 
