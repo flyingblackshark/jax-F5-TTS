@@ -667,7 +667,7 @@ def setup_models_and_state(config):
         dummy_audio_shape = (compile_batch_size, dummy_audio_len)
         #dummy_audio = jnp.zeros(dummy_audio_shape, dtype=jnp.float32)
         #dummy_audio_sharded = jax.device_put(dummy_audio, get_mel_in_shardings[0])
-        serialized_compiled = load_serialized_compiled("/root/MaxTTS-Diffusion/get_mel_aot.pickle")
+        serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,"get_mel_aot.pickle"))
         shaped_batch = jax.ShapeDtypeStruct(dummy_audio_shape,dtype=jnp.float32)
         shaped_input_args = (shaped_batch,)
         shaped_input_kwargs = {}
@@ -779,7 +779,7 @@ def setup_models_and_state(config):
         #     static_argnums=() # No static args in apply needed here
         # )
         dummy_text_ids_shape = (bucket, global_max_sequence_length)
-        serialized_compiled = load_serialized_compiled(f"/root/MaxTTS-Diffusion/text_encode_aot_{bucket}.pickle")
+        serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,f"text_encode_aot_{bucket}.pickle"))
         shaped_batch = (jax.ShapeDtypeStruct(dummy_text_ids_shape,dtype=jnp.int32),jax.ShapeDtypeStruct(dummy_text_ids_shape,dtype=jnp.int32))
         shaped_input_args = (global_text_encoder_params,*shaped_batch,rngs_init)
         shaped_input_kwargs = {}
@@ -835,7 +835,7 @@ def setup_models_and_state(config):
         # )
         dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
         #dummy_latents_vocoder = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-        serialized_compiled = load_serialized_compiled(f"/root/MaxTTS-Diffusion/vocos_apply_aot_{bucket}.pickle")
+        serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,f"vocos_apply_aot_{bucket}.pickle"))
         shaped_batch = (jax.ShapeDtypeStruct(dummy_latents_shape,dtype=jnp.int32),)
         shaped_input_args = (global_vocos_params,*shaped_batch,rngs_init)
         shaped_input_kwargs = {}
@@ -912,7 +912,7 @@ def setup_models_and_state(config):
             dummy_c_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[:-1]
             #dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
 
-            serialized_compiled = load_serialized_compiled(f"/root/MaxTTS-Diffusion/run_inference_aot_{bucket}.pickle")
+            serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,f"run_inference_aot_{bucket}.pickle"))
             shaped_batch = (
                 jax.ShapeDtypeStruct(dummy_latents_shape,dtype=jnp.float32),
                 jax.ShapeDtypeStruct(dummy_latents_shape,dtype=jnp.float32),

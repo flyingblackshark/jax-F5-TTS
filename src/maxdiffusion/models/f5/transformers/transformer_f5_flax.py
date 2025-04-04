@@ -85,7 +85,6 @@ class F5TransformerBlock(nn.Module):
         epsilon=self.eps,
         dtype=self.dtype,
         param_dtype=self.weights_dtype,
-        use_fast_variance=False,
     )
     self.ff = nn.Sequential(
         [
@@ -140,6 +139,9 @@ class ConvPositionEmbedding(nn.Module):
     dim: int
     kernel_size: int = 31
     groups: int = 16
+    dtype: jnp.dtype = jnp.float32
+    weights_dtype: jnp.dtype = jnp.float32
+    precision: jax.lax.Precision = None
 
     @nn.compact
     def __call__(self, x, mask=None):
@@ -154,8 +156,10 @@ class ConvPositionEmbedding(nn.Module):
             features=self.dim,
             kernel_size=(self.kernel_size,),
             padding='SAME',
-            feature_group_count=self.groups
-        )(x)
+            feature_group_count=self.groups,
+            dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,)(x)
         x = jax.nn.mish(x)
         
         if mask is not None:
@@ -165,8 +169,10 @@ class ConvPositionEmbedding(nn.Module):
             features=self.dim,
             kernel_size=(self.kernel_size,),
             padding='SAME',
-            feature_group_count=self.groups
-        )(x)
+            feature_group_count=self.groups,
+            dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,)(x)
         x = jax.nn.mish(x)
         
         if mask is not None:
@@ -177,7 +183,9 @@ class InputEmbedding(nn.Module):
     mel_dim: int
     text_dim: int
     out_dim: int
-
+    dtype: jnp.dtype = jnp.float32
+    weights_dtype: jnp.dtype = jnp.float32
+    precision: jax.lax.Precision = None
     @nn.compact
     def __call__(self, x, 
                  cond, 
@@ -191,11 +199,18 @@ class InputEmbedding(nn.Module):
         
         # 将 x, cond, text_embed 在最后一个维度上拼接
         concat_input = jnp.concatenate([x, cond, text_embed], axis=-1)
-        x_proj = nn.Dense(features=self.out_dim)(concat_input)
+        x_proj = nn.Dense(
+            features=self.out_dim,
+            dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,)(concat_input)
         if decoder_segment_ids is not None:
             x_proj = x_proj * decoder_segment_ids[...,jnp.newaxis]
         # 将卷积位置编码加到投影结果上
-        x_out = x_proj + ConvPositionEmbedding(dim=self.out_dim)(x_proj,mask=decoder_segment_ids)
+        x_out = x_proj + ConvPositionEmbedding(dim=self.out_dim,          
+                                               dtype=self.dtype,
+            weights_dtype=self.weights_dtype,
+            precision=self.precision,)(x_proj,mask=decoder_segment_ids)
         if decoder_segment_ids is not None:
             x_out = x_out * decoder_segment_ids[...,jnp.newaxis]
         return x_out
@@ -218,6 +233,9 @@ class ConvNeXtV2Block(nn.Module):
     dim: int
     intermediate_dim: int
     dilation: int = 1
+    dtype: jnp.dtype = jnp.float32
+    weights_dtype: jnp.dtype = jnp.float32
+    precision: jax.lax.Precision = None
 
     @nn.compact
     def __call__(self, x):
@@ -232,17 +250,28 @@ class ConvNeXtV2Block(nn.Module):
             strides=(1,),
             padding=((padding, padding),),
             feature_group_count=self.dim,
-            input_dilation=(self.dilation,)
+            input_dilation=(self.dilation,),
+            dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,
         )(x)
         # Layer normalization (applied over the last dimension)
-        x = nn.LayerNorm(epsilon=1e-6)(x)
+        x = nn.LayerNorm(epsilon=1e-6,
+                dtype=self.dtype,
+                param_dtype=self.weights_dtype,)(x)
         # First pointwise (dense) layer
-        x = nn.Dense(features=self.intermediate_dim)(x)
+        x = nn.Dense(features=self.intermediate_dim,
+                    dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,)(x)
         x = nn.gelu(x,approximate=False)
         # Apply GRN module on the intermediate features
         x = GRN(dim=self.intermediate_dim)(x)
         # Second pointwise (dense) layer
-        x = nn.Dense(features=self.dim)(x)
+        x = nn.Dense(features=self.dim,
+                    dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,)(x)
         return residual + x
     
 
@@ -298,7 +327,11 @@ class F5TextEmbedding(nn.Module):
             self.extra_modeling = True
             self.precompute_max_pos = 4096  # ~44s of 24khz audio
             self.freqs_cis = precompute_freqs_cis(self.text_dim, self.precompute_max_pos)
-            self.text_blocks = [ConvNeXtV2Block(self.text_dim, self.text_dim * self.conv_mult) for _ in range(self.conv_layers)]
+            self.text_blocks = [ConvNeXtV2Block(
+            self.text_dim, self.text_dim * self.conv_mult,
+            dtype=self.dtype,
+            weights_dtype=self.weights_dtype,
+            precision=self.precision,) for _ in range(self.conv_layers)]
             
         else:
             self.extra_modeling = False
@@ -397,13 +430,24 @@ class SinusPositionEmbedding(nn.Module):
 class TimestepEmbedding(nn.Module):
     dim: int
     freq_embed_dim: int = 256
+    dtype: jnp.dtype = jnp.float32
+    weights_dtype: jnp.dtype = jnp.float32
+    precision: jax.lax.Precision = None
 
     def setup(self):
         # 创建 SinusPositionEmbedding 子模块
         self.time_embed = SinusPositionEmbedding(dim=self.freq_embed_dim)
         # 定义 MLP，两层全连接，中间用 SiLU 激活函数
-        self.linear1 = nn.Dense(features=self.dim)
-        self.linear2 = nn.Dense(features=self.dim)
+        self.linear1 = nn.Dense(
+            features=self.dim,
+            dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,)
+        self.linear2 = nn.Dense(
+            features=self.dim,
+            dtype=self.dtype,
+            param_dtype=self.weights_dtype,
+            precision=self.precision,)
 
     def __call__(self, timestep):
         """
@@ -490,8 +534,18 @@ class F5Transformer2DModel(nn.Module):
   heads:int = 16
 
   def setup(self):
-    self.time_embed = TimestepEmbedding(self.dim)
-    self.input_embed = InputEmbedding(self.mel_dim,self.text_dim,self.dim)
+    self.time_embed = TimestepEmbedding(
+            dim=self.dim,
+            dtype=self.dtype,
+            weights_dtype=self.weights_dtype,
+            precision=self.precision,)
+    self.input_embed = InputEmbedding(
+        mel_dim=self.mel_dim,
+        text_dim=self.text_dim,
+        out_dim=self.dim,
+        dtype=self.dtype,
+        weights_dtype=self.weights_dtype,
+        precision=self.precision,)
     #self.text_embed = TextEmbedding(self.text_num_embeds, self.text_dim, conv_layers=self.conv_layers)
     self.rotary_embed = RotaryEmbedding(self.dim_head)
 
