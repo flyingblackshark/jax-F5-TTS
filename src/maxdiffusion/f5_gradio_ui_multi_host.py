@@ -44,7 +44,7 @@ jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache"
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
 MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
-MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
+MAX_INFERENCE_STEPS = 128 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
 BUCKET_SIZES = sorted([8, 16, 32, 64])
@@ -1020,8 +1020,8 @@ def setup_models_and_state(config):
             dummy_cond = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
             dummy_decoder_segment_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.float32)
             dummy_text_embed = jnp.zeros(dummy_text_embed_shape, dtype=jnp.float32)
-            dummy_c_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[:-1]
-            dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
+            dummy_c_ts = jnp.linspace(0.0, 1.0, MAX_INFERENCE_STEPS//2 + 1)[:-1]
+            dummy_p_ts = jnp.linspace(0.0, 1.0, MAX_INFERENCE_STEPS//2 + 1)[1:]
             _ = global_p_run_inference_funcs[bucket](
                 global_transformer_state,
                 dummy_latents,
@@ -1054,81 +1054,53 @@ def main(argv: Sequence[str]) -> None:
         max_logging.error(f"Fatal error during setup: {e}", exc_info=True)
         print(f"\n\nERROR DURING SETUP: {e}\nCannot launch Gradio app.")
         return # Exit if setup fails
+    if jax.process_index() == 0:
+        # --- Create Gradio Interface ---
+        css = """
+        .audio-container { display: flex; justify-content: center; align-items: center; }
+        .transcription-container { margin-top: 10px; }
+        footer {visibility: hidden}
+        """
+        with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
+            gr.Markdown("## F5 Text-to-Speech Synthesis")
+            gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
 
-    # --- Create Gradio Interface ---
-    css = """
-    .audio-container { display: flex; justify-content: center; align-items: center; }
-    .transcription-container { margin-top: 10px; }
-    footer {visibility: hidden}
-    """
-    with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
-        gr.Markdown("## F5 Text-to-Speech Synthesis")
-        gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
+            with gr.Row():
+                with gr.Column():
+                    ref_text_input = gr.Textbox(label="Reference Text", info="Text corresponding to the reference audio.", value=DEFAULT_REF_TEXT, lines=3)
+                    ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
+                    gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
+                    with gr.Row():
+                        steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=MAX_INFERENCE_STEPS//2, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
+                        cfg_slider = gr.Slider(minimum=1.0, maximum=10.0, value=2.0, step=0.1, label="Guidance Scale (CFG)", info="Higher values follow prompts more strictly but can reduce diversity.")
+                    with gr.Row():
+                        speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
+                        # === Add Sway Sampling Switch ===
+                        sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=False, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
+                        # ==============================
+                    submit_btn = gr.Button("Generate Audio", variant="primary")
 
-        with gr.Row():
-            with gr.Column():
-                ref_text_input = gr.Textbox(label="Reference Text", info="Text corresponding to the reference audio.", value=DEFAULT_REF_TEXT, lines=3)
-                ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
-                gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
-                with gr.Row():
-                    steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
-                    cfg_slider = gr.Slider(minimum=1.0, maximum=10.0, value=2.0, step=0.1, label="Guidance Scale (CFG)", info="Higher values follow prompts more strictly but can reduce diversity.")
-                with gr.Row():
-                    speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
-                    # === Add Sway Sampling Switch ===
-                    sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=False, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
-                    # ==============================
-                submit_btn = gr.Button("Generate Audio", variant="primary")
+                with gr.Column(scale=1): # Make right column narrower
+                    audio_output = gr.Audio(label="Generated Audio", type="numpy")
 
-            with gr.Column(scale=1): # Make right column narrower
-                audio_output = gr.Audio(label="Generated Audio", type="numpy")
+            # Update button click inputs list order
+            submit_btn.click(
+                fn=generate_audio,
+                inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
+                outputs=[audio_output],
+            )
 
-
-        # --- Examples (Updated) ---
-        gr.Examples(
-            examples=[
-                [
-                    "And maybe read maybe read that book you brought?",
-                    "test.mp3", # Replace path
-                    "This is a test of the emergency broadcast system.",
-                    50, 2.0, 1.0, False # Sway disabled
-                ],
-                [
-                    "I strongly believe that love is one of the only things we have in this world.",
-                    "test.mp3", # Replace path
-                    "你好，世界！这是一个测试。",
-                    50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "The quick brown fox jumps over the lazy dog.",
-                    60, 3.0, 0.8, False # Sway disabled
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "Sway sampling can sometimes alter the generation dynamics.",
-                    50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
-                ],
-            ],
-            # Update inputs list order
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-            outputs=[audio_output],
-            fn=generate_audio,
-            cache_examples=False,
-        )
-
-        # Update button click inputs list order
-        submit_btn.click(
-            fn=generate_audio,
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-            outputs=[audio_output],
-        )
-
-    # Launch the Gradio app
-    max_logging.log("Launching Gradio interface...")
-    iface.launch(share=True, server_name="0.0.0.0") # Allow external access if needed
+        # Launch the Gradio app
+        max_logging.log("Launching Gradio interface...")
+        iface.launch(share=True, server_name="0.0.0.0") # Allow external access if needed
+    else:
+        # Other hosts keep running to participate in JAX computations
+        # They need to stay alive to respond to collective calls triggered by host 0
+        max_logging.log(f"Host {jax.process_index()}: Standing by for JAX computations...")
+        # Keep the script running, e.g., by sleeping indefinitely or waiting on a specific event
+        # In a real app, they might be part of a more complex worker loop
+        while True:
+            time.sleep(3600)
 
 
 if __name__ == "__main__":
