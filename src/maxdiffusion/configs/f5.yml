@@ -24,9 +24,9 @@ save_config_to_gcs: False
 log_period: 100
 
 vocoder_model_path: ''
-pretrained_model_name_or_path: '/root/bucket/aurora_f5_model_v1.pt'
-vocab_name_or_path: '/root/bucket/vocab.txt'
-compiled_path: '/root/bucket/'
+pretrained_model_name_or_path: '/home/fbsdev011/bucket/aurora_f5_model_v1.pt'
+vocab_name_or_path: '/home/fbsdev011/bucket/vocab.txt'
+compiled_path: '/home/fbsdev011/bucket/'
 use_ema: True
 
 # Flux params
