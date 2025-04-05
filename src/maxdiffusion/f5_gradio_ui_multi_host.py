@@ -1126,6 +1126,6 @@ if __name__ == "__main__":
   # data_sharding: ['data'] # Sharding axis name for batch dim
   # logical_axis_rules: [['batch', 'data']] # Example rule
   # gradio_share: False # Set to True to create public link (use with caution)
-  jax.config.update("jax_explain_cache_misses", True)
+  #jax.config.update("jax_explain_cache_misses", True)
   jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
   app.run(main)
