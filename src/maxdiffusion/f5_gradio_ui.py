@@ -1085,39 +1085,39 @@ def main(argv: Sequence[str]) -> None:
 
 
         # --- Examples (Updated) ---
-        gr.Examples(
-            examples=[
-                [
-                    "And maybe read maybe read that book you brought?",
-                    "test.mp3", # Replace path
-                    "This is a test of the emergency broadcast system.",
-                    50, 2.0, 1.0, False # Sway disabled
-                ],
-                [
-                    "I strongly believe that love is one of the only things we have in this world.",
-                    "test.mp3", # Replace path
-                    "你好，世界！这是一个测试。",
-                    50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "The quick brown fox jumps over the lazy dog.",
-                    60, 3.0, 0.8, False # Sway disabled
-                ],
-                 [
-                    DEFAULT_REF_TEXT,
-                    "test.mp3", # Replace path
-                    "Sway sampling can sometimes alter the generation dynamics.",
-                    50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
-                ],
-            ],
-            # Update inputs list order
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-            outputs=[audio_output],
-            fn=generate_audio,
-            cache_examples=False,
-        )
+        # gr.Examples(
+        #     examples=[
+        #         [
+        #             "And maybe read maybe read that book you brought?",
+        #             "test.mp3", # Replace path
+        #             "This is a test of the emergency broadcast system.",
+        #             50, 2.0, 1.0, False # Sway disabled
+        #         ],
+        #         [
+        #             "I strongly believe that love is one of the only things we have in this world.",
+        #             "test.mp3", # Replace path
+        #             "你好，世界！这是一个测试。",
+        #             50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
+        #         ],
+        #          [
+        #             DEFAULT_REF_TEXT,
+        #             "test.mp3", # Replace path
+        #             "The quick brown fox jumps over the lazy dog.",
+        #             60, 3.0, 0.8, False # Sway disabled
+        #         ],
+        #          [
+        #             DEFAULT_REF_TEXT,
+        #             "test.mp3", # Replace path
+        #             "Sway sampling can sometimes alter the generation dynamics.",
+        #             50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
+        #         ],
+        #     ],
+        #     # Update inputs list order
+        #     inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
+        #     outputs=[audio_output],
+        #     fn=generate_audio,
+        #     cache_examples=False,
+        # )
 
         # Update button click inputs list order
         submit_btn.click(

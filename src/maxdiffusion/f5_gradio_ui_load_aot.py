@@ -40,7 +40,7 @@ import soundfile as sf
 import io
 import pickle
 from jax.experimental.serialize_executable import deserialize_and_load
-from f5_gradio_ui import list_str_to_idx,convert_char_to_pinyin,lens_to_mask,get_tokenizer,chunk_text
+from maxdiffusion.f5_gradio_ui import list_str_to_idx,convert_char_to_pinyin,lens_to_mask,get_tokenizer,chunk_text
 # --- Configuration & Constants ---
 #jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
@@ -973,7 +973,7 @@ def main(argv: Sequence[str]) -> None:
         with gr.Row():
             with gr.Column():
                 ref_text_input = gr.Textbox(label="Reference Text", info="Text corresponding to the reference audio.", value=DEFAULT_REF_TEXT, lines=3)
-                ref_audio_input = gr.Audio(value="/root/MaxTTS-Diffusion/test.mp3",label="Reference Audio", type="numpy")
+                ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
                 gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
                 with gr.Row():
                     #steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
