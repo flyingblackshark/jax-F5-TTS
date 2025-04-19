@@ -3,6 +3,8 @@ import jieba
 import os
 from importlib.resources import files
 import re
+import numpy as np
+from typing import Optional, Union
 def convert_char_to_pinyin(text_list, polyphone=True):
     if jieba.dt.initialized is False:
         jieba.default_logger.setLevel(50)  # CRITICAL
