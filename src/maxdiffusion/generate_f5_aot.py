@@ -4,12 +4,9 @@ from typing import Callable, List, Union, Sequence, Tuple
 from absl import app
 from contextlib import ExitStack
 import functools
-import jax.experimental
-import jax.experimental.compilation_cache.compilation_cache
-import jax.experimental.ode
 import numpy as np
 import jax
-from jax.sharding import Mesh, PositionalSharding, PartitionSpec as P
+from jax.sharding import Mesh, PartitionSpec as P
 import jax.numpy as jnp
 import flax.linen as nn
 from chex import Array

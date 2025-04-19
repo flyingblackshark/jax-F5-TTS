@@ -20,19 +20,11 @@ from contextlib import ExitStack
 import functools
 import jax.experimental
 import jax.experimental.compilation_cache.compilation_cache
-import jax.experimental.ode
 import numpy as np
 import jax
-from jax.sharding import Mesh, PositionalSharding, PartitionSpec as P
+from jax.sharding import Mesh, PartitionSpec as P
 import jax.numpy as jnp
-import flax.linen as nn
-from chex import Array
-from einops import rearrange
 from flax.linen import partitioning as nn_partitioning
-import flax
-import re
-from pypinyin import lazy_pinyin, Style
-import jieba
 from maxdiffusion import pyconfig, max_logging
 from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5TextEmbedding, F5Transformer2DModel
 from maxdiffusion.max_utils import (
@@ -45,10 +37,9 @@ from maxdiffusion.max_utils import (
 )
 import time
 from maxdiffusion.models.modeling_flax_pytorch_utils import convert_f5_state_dict_to_flax
-import os
-from importlib.resources import files
+from maxdiffusion.utils.mel_util import get_mel
+from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin
 import librosa
-import audax.core.functional
 import jax.experimental.compilation_cache
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2
@@ -144,125 +135,6 @@ def run(config):
     transformer_state = transformer_state.replace(params=transformer_params)
     transformer_state = jax.device_put(transformer_state, transformer_state_shardings)
     get_memory_allocations()
-    def dynamic_range_compression_jax(x, C=1, clip_val=1e-7):
-        return jnp.log(jnp.clip(x,min=clip_val) * C)
-
-    def get_mel(y, n_mels=100,n_fft=1024,win_size=1024,hop_length=256,fmin=0,fmax=None,clip_val=1e-7,sampling_rate=24000):
-        window = jnp.hanning(win_size)
-        spec_func = functools.partial(audax.core.functional.spectrogram, pad=0, window=window, n_fft=n_fft,
-                        hop_length=hop_length, win_length=win_size, power=1.,
-                        normalized=False, center=True, onesided=True)
-        fb = audax.core.functional.melscale_fbanks(n_freqs=(n_fft//2)+1, n_mels=n_mels,
-                            sample_rate=sampling_rate, f_min=fmin, f_max=fmax)
-        mel_spec_func = functools.partial(audax.core.functional.apply_melscale, melscale_filterbank=fb)
-        spec = spec_func(y)
-        spec = mel_spec_func(spec)
-        spec = dynamic_range_compression_jax(spec, clip_val=clip_val)
-        return spec
-
-    
-    def convert_char_to_pinyin(text_list, polyphone=True):
-        if jieba.dt.initialized is False:
-            jieba.default_logger.setLevel(50)  # CRITICAL
-            jieba.initialize()
-
-        final_text_list = []
-        custom_trans = str.maketrans(
-            {";": ",", "“": '"', "”": '"', "‘": "'", "’": "'"}
-        )  # add custom trans here, to address oov
-
-        def is_chinese(c):
-            return (
-                "\u3100" <= c <= "\u9fff"  # common chinese characters
-            )
-
-        for text in text_list:
-            char_list = []
-            text = text.translate(custom_trans)
-            for seg in jieba.cut(text):
-                seg_byte_len = len(bytes(seg, "UTF-8"))
-                if seg_byte_len == len(seg):  # if pure alphabets and symbols
-                    if char_list and seg_byte_len > 1 and char_list[-1] not in " :'\"":
-                        char_list.append(" ")
-                    char_list.extend(seg)
-                elif polyphone and seg_byte_len == 3 * len(seg):  # if pure east asian characters
-                    seg_ = lazy_pinyin(seg, style=Style.TONE3, tone_sandhi=True)
-                    for i, c in enumerate(seg):
-                        if is_chinese(c):
-                            char_list.append(" ")
-                        char_list.append(seg_[i])
-                else:  # if mixed characters, alphabets and symbols
-                    for c in seg:
-                        if ord(c) < 256:
-                            char_list.extend(c)
-                        elif is_chinese(c):
-                            char_list.append(" ")
-                            char_list.extend(lazy_pinyin(c, style=Style.TONE3, tone_sandhi=True))
-                        else:
-                            char_list.append(c)
-            final_text_list.append(char_list)
-
-        return final_text_list
-    def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
-        """
-        tokenizer   - "pinyin" do g2p for only chinese characters, need .txt vocab_file
-                    - "char" for char-wise tokenizer, need .txt vocab_file
-                    - "byte" for utf-8 tokenizer
-                    - "custom" if you're directly passing in a path to the vocab.txt you want to use
-        vocab_size  - if use "pinyin", all available pinyin types, common alphabets (also those with accent) and symbols
-                    - if use "char", derived from unfiltered character & symbol counts of custom dataset
-                    - if use "byte", set to 256 (unicode byte range)
-        """
-        if tokenizer in ["pinyin", "char"]:
-            tokenizer_path = os.path.join(files("f5_tts").joinpath("../../data"), f"{dataset_name}_{tokenizer}/vocab.txt")
-            with open(tokenizer_path, "r", encoding="utf-8") as f:
-                vocab_char_map = {}
-                for i, char in enumerate(f):
-                    vocab_char_map[char[:-1]] = i
-            vocab_size = len(vocab_char_map)
-            assert vocab_char_map[" "] == 0, "make sure space is of idx 0 in vocab.txt, cuz 0 is used for unknown char"
-
-        elif tokenizer == "byte":
-            vocab_char_map = None
-            vocab_size = 256
-
-        elif tokenizer == "custom":
-            with open(dataset_name, "r", encoding="utf-8") as f:
-                vocab_char_map = {}
-                for i, char in enumerate(f):
-                    vocab_char_map[char[:-1]] = i
-            vocab_size = len(vocab_char_map)
-
-        return vocab_char_map, vocab_size
-
-    def chunk_text(text, max_chars=135):
-        """
-        Splits the input text into chunks, each with a maximum number of characters.
-
-        Args:
-            text (str): The text to be split.
-            max_chars (int): The maximum number of characters per chunk.
-
-        Returns:
-            List[str]: A list of text chunks.
-        """
-        chunks = []
-        current_chunk = ""
-        # Split the text into sentences based on punctuation followed by whitespace
-        sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
-
-        for sentence in sentences:
-            if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
-                current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
-
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-
-        return chunks
     num_devices = len(jax.devices())
     data_sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
     #data_sharding = jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), "sequence"))

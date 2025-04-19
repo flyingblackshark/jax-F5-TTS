@@ -25,7 +25,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from flax.linen import partitioning as nn_partitioning
 import optax
-from maxdiffusion.trainers.base_stable_diffusion_trainer import BaseStableDiffusionTrainer
+from maxdiffusion.trainers.base_f5_trainer import BaseF5Trainer
 
 from maxdiffusion import (FlaxDDPMScheduler, maxdiffusion_utils, train_utils, max_utils, max_logging)
 
@@ -35,11 +35,11 @@ from maxdiffusion.models.vae_flax import FlaxDiagonalGaussianDistribution
 from maxdiffusion.checkpointing.base_stable_diffusion_checkpointer import (STABLE_DIFFUSION_CHECKPOINT)
 
 
-class F5Trainer(BaseStableDiffusionTrainer):
+class F5Trainer(BaseF5Trainer):
   checkpoint_manager: None
 
   def __init__(self, config, checkpoint_type=STABLE_DIFFUSION_CHECKPOINT):
-    BaseStableDiffusionTrainer.__init__(self, config, checkpoint_type)
+    BaseF5Trainer.__init__(self, config, checkpoint_type)
 
   def pre_training_steps(self):
     return super().pre_training_steps()
