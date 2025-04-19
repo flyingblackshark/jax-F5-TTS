@@ -46,7 +46,7 @@ def convert_char_to_pinyin(text_list, polyphone=True):
 
     return final_text_list
 
-def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
+def get_tokenizer(dataset_name, tokenizer: str = "custom"):
     """
     tokenizer   - "pinyin" do g2p for only chinese characters, need .txt vocab_file
                 - "char" for char-wise tokenizer, need .txt vocab_file
@@ -80,29 +80,79 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
 
 def chunk_text(text, max_chars=135):
     """
-    Splits the input text into chunks, each with a maximum number of characters.
-
-    Args:
-        text (str): The text to be split.
-        max_chars (int): The maximum number of characters per chunk.
-
-    Returns:
-        List[str]: A list of text chunks.
+    Splits the input text into chunks based on estimated character count,
+    respecting sentence boundaries where possible.
+    Max_chars is an estimate, actual byte length might vary.
     """
     chunks = []
     current_chunk = ""
-    # Split the text into sentences based on punctuation followed by whitespace
-    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
+    # More robust sentence splitting for English and Chinese
+    sentences = re.split(r'(?<=[.?!;；。？！])\s*', text)
+    # Filter out empty strings that can result from splitting
+    sentences = [s for s in sentences if s]
+
+    if not sentences:
+        if text: # Handle case where text has no sentence-ending punctuation
+            sentences = [text]
+        else:
+            return [] # No text, no chunks
 
     for sentence in sentences:
-        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
-            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+        sentence = sentence.strip()
+        if not sentence:
+            continue
 
-    if current_chunk:
+        # Estimate length (simple char count, pinyin will expand this later)
+        if len(current_chunk) + len(sentence) < max_chars:
+            current_chunk += sentence + " " # Add space between sentences
+        else:
+            # If adding the sentence exceeds max_chars
+            if current_chunk: # Add the previous chunk if it exists
+                chunks.append(current_chunk.strip())
+                current_chunk = sentence + " " # Start new chunk with current sentence
+            else: # Sentence itself is longer than max_chars
+                # Simple split for very long sentences (could be improved)
+                parts = [sentence[i:i+max_chars] for i in range(0, len(sentence), max_chars)]
+                chunks.extend(p.strip() + (" " if i < len(parts)-1 else "") for i, p in enumerate(parts))
+                current_chunk = "" # Reset current chunk
+
+    if current_chunk: # Add the last chunk
         chunks.append(current_chunk.strip())
 
+    # Filter out any potential empty chunks again
+    chunks = [c for c in chunks if c]
     return chunks
+
+def list_str_to_idx(
+    text: list[list[str]], # Expects list of lists of chars/pinyin
+    vocab_char_map: dict[str, int],
+    max_length: int,
+    padding_value=0, # Use 0 for padding index (which maps to space or unknown)
+):
+    outs = []
+    #unk_idx = vocab_char_map.get('<unk>', vocab_char_map.get(' ', 0)) # Use space if <unk> not present
+
+    for t in text:
+        # Map characters/pinyin, using unk_idx for unknown ones
+        list_idx_tensors = [vocab_char_map.get(c, 0) for c in t]
+        text_ids = np.asarray(list_idx_tensors, dtype=np.int32)
+
+        # Add 1 to all indices (making padding 1, original indices shifted)
+        text_ids = text_ids + 1 # Let's reconsider this, maybe padding with 0 is better if space is 0
+
+        # Pad sequence
+        pad_len = max_length - text_ids.shape[-1]
+        if pad_len < 0:
+            print(f"Warning: Truncating text sequence from {text_ids.shape[-1]} to {max_length}")
+            text_ids = text_ids[:max_length]
+            pad_len = 0
+
+        # Pad with the designated padding_value (e.g., 0)
+        text_ids = np.pad(text_ids, ((0, pad_len)), constant_values=padding_value)
+        outs.append(text_ids)
+
+    if not outs:
+      return np.array([], dtype=np.int32).reshape(0, max_length)
+
+    stacked_text_ids = np.stack(outs)
+    return stacked_text_ids

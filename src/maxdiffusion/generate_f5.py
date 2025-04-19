@@ -38,7 +38,7 @@ from maxdiffusion.max_utils import (
 import time
 from maxdiffusion.models.modeling_flax_pytorch_utils import convert_f5_state_dict_to_flax
 from maxdiffusion.utils.mel_util import get_mel
-from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin
+from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
 import librosa
 import jax.experimental.compilation_cache
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
@@ -163,22 +163,6 @@ def run(config):
         batched_text_list.append(text_list)
     final_text_list = convert_char_to_pinyin(batched_text_list)
     
-    def list_str_to_idx(
-        text: list[str] | list[list[str]],
-        vocab_char_map: dict[str, int],  # {char: idx}
-        #padding_value=-1,
-    ):  # noqa: F722
-        outs = []
-        for t in text:
-            list_idx_tensors = [vocab_char_map.get(c, 0) for c in t]  # pinyin or char style
-            text_ids = jnp.asarray(list_idx_tensors)
-            #text = pad_sequence(list_idx_tensors, padding_value=padding_value, batch_first=True)
-            text_ids = text_ids + 1
-            text_ids = jnp.pad(text_ids, ((0, max_duration - text_ids.shape[-1])))
-            outs.append(text_ids)
-        stacked_text_idss = jnp.stack(outs)
-        return stacked_text_idss
-    text_ids = list_str_to_idx(final_text_list, vocab_char_map)
     padded_batch_size = batch_size - text_ids.shape[0]
     text_ids = jnp.pad(text_ids, ((0,padded_batch_size),(0,0)))
 

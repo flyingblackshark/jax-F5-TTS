@@ -30,10 +30,10 @@ from maxdiffusion import (
 from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5Transformer2DModel
 from ..pipelines.f5.f5_pipeline import F5Pipeline
 
-from transformers import (CLIPTokenizer, FlaxCLIPTextModel, FlaxT5EncoderModel, AutoTokenizer)
+#from transformers import (CLIPTokenizer, FlaxCLIPTextModel, FlaxT5EncoderModel, AutoTokenizer)
 
 from maxdiffusion.checkpointing.checkpointing_utils import (create_orbax_checkpoint_manager)
-from maxdiffusion.models.f5.util import load_flow_model
+#from maxdiffusion.models.f5.util import load_flow_model
 
 F5_CHECKPOINT = "F5_CHECKPOINT"
 _CHECKPOINT_FORMAT_ORBAX = "CHECKPOINT_FORMAT_ORBAX"
@@ -41,9 +41,9 @@ _CHECKPOINT_FORMAT_ORBAX = "CHECKPOINT_FORMAT_ORBAX"
 F5_STATE_KEY = "F5_state"
 F5_TRANSFORMER_PARAMS_KEY = "F5_transformer_params"
 F5_STATE_SHARDINGS_KEY = "F5_state_shardings"
-F5_VAE_PARAMS_KEY = "F5_vae"
-VAE_STATE_KEY = "vae_state"
-VAE_STATE_SHARDINGS_KEY = "vae_state_shardings"
+#F5_VAE_PARAMS_KEY = "F5_vae"
+#VAE_STATE_KEY = "vae_state"
+#VAE_STATE_SHARDINGS_KEY = "vae_state_shardings"
 
 
 class F5Checkpointer(ABC):

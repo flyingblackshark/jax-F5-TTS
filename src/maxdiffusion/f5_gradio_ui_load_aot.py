@@ -3,21 +3,11 @@ from typing import Callable, List, Union, Sequence, Tuple
 from absl import app
 from contextlib import ExitStack
 import functools
-import jax.experimental
-import jax.experimental.compilation_cache.compilation_cache
-import jax.experimental.ode
 import numpy as np
 import jax
-from jax.sharding import Mesh, PositionalSharding, PartitionSpec as P
+from jax.sharding import Mesh, PartitionSpec as P
 import jax.numpy as jnp
-import flax.linen as nn
-from chex import Array
-from einops import rearrange
-from flax.linen import partitioning as nn_partitioning
 import flax
-import re
-from pypinyin import lazy_pinyin, Style
-import jieba
 from maxdiffusion import pyconfig, max_logging
 from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5TextEmbedding, F5Transformer2DModel
 from maxdiffusion.max_utils import (
@@ -31,16 +21,14 @@ from maxdiffusion.max_utils import (
 import time
 from maxdiffusion.models.modeling_flax_pytorch_utils import convert_f5_state_dict_to_flax
 import os
-from importlib.resources import files
 import librosa
 import audax.core.functional
-import jax.experimental.compilation_cache
 from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
-import soundfile as sf
-import io
 import pickle
 from jax.experimental.serialize_executable import deserialize_and_load
-from maxdiffusion.f5_gradio_ui import list_str_to_idx,convert_char_to_pinyin,lens_to_mask,get_tokenizer,chunk_text
+from maxdiffusion.f5_gradio_ui import lens_to_mask
+from maxdiffusion.utils.mel_util import get_mel
+from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
 # --- Configuration & Constants ---
 #jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
