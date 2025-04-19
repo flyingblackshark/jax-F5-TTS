@@ -232,8 +232,8 @@ class F5Pipeline(FlaxDiffusionPipeline):
 
   def encode_prompt(
       self,
-      prompt: Union[str, List[str]],
-      prompt_2: Union[str, List[str]],
+      text: Union[str, List[str]],
+      #prompt_2: Union[str, List[str]],
       clip_tokenizer: CLIPTokenizer,
       clip_text_encoder: FlaxCLIPTextModel,
       t5_tokenizer: AutoTokenizer,

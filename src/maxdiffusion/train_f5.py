@@ -24,7 +24,7 @@ from maxdiffusion import (
     mllog_utils,
 )
 
-from maxdiffusion.trainers.f5_trainer import F5Trainer
+
 
 from maxdiffusion.train_utils import (
     validate_train_config,
@@ -32,6 +32,8 @@ from maxdiffusion.train_utils import (
 
 
 def train(config):
+  from maxdiffusion.trainers.f5_trainer import F5Trainer
+  
   trainer = F5Trainer(config)
   trainer.start_training()
 

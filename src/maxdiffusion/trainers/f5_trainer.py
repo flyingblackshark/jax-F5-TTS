@@ -15,152 +15,308 @@
  """
 
 import os
-import sys
 from functools import partial
 import datetime
 import time
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PositionalSharding, PartitionSpec as P
 from flax.linen import partitioning as nn_partitioning
-import optax
-from maxdiffusion.trainers.base_f5_trainer import BaseF5Trainer
-
-from maxdiffusion import (FlaxDDPMScheduler, maxdiffusion_utils, train_utils, max_utils, max_logging)
+from maxdiffusion.checkpointing.f5_checkpointer import (
+    F5Checkpointer,
+    F5_CHECKPOINT,
+    F5_STATE_KEY,
+    F5_STATE_SHARDINGS_KEY,
+    # VAE_STATE_KEY,
+    # VAE_STATE_SHARDINGS_KEY,
+)
 
 from maxdiffusion.input_pipeline.input_pipeline_interface import (make_data_iterator)
-from maxdiffusion.models.vae_flax import FlaxDiagonalGaussianDistribution
 
-from maxdiffusion.checkpointing.base_stable_diffusion_checkpointer import (STABLE_DIFFUSION_CHECKPOINT)
+from maxdiffusion import (max_utils, max_logging)
+
+from maxdiffusion.train_utils import (
+    get_first_step,
+    load_next_batch,
+    record_scalar_metrics,
+    write_metrics,
+)
+
+from maxdiffusion.maxdiffusion_utils import calculate_f5_tflops
+
+from ..schedulers import (FlaxEulerDiscreteScheduler)
 
 
-class F5Trainer(BaseF5Trainer):
-  checkpoint_manager: None
+class F5Trainer(F5Checkpointer):
 
-  def __init__(self, config, checkpoint_type=STABLE_DIFFUSION_CHECKPOINT):
-    BaseF5Trainer.__init__(self, config, checkpoint_type)
+  def __init__(self, config):
+    F5Checkpointer.__init__(self, config, F5_CHECKPOINT)
 
-  def pre_training_steps(self):
-    return super().pre_training_steps()
+    self.text_encoder_2_learning_rate_scheduler = None
 
-  def post_training_steps(self, pipeline, params, train_states):
-    return super().post_training_steps(pipeline, params, train_states)
+    if config.train_text_encoder:
+      raise ValueError("this script currently doesn't support training text_encoders")
 
-  def get_shaped_batch(self, config, pipeline):
-    """Return the shape of the batch - this is what eval_shape would return for the
-    output of create_data_iterator_with_tokenizer, but eval_shape doesn't work, see b/306901078.
-    This function works with sd1.x and 2.x.
-    """
-    total_train_batch_size = self.total_train_batch_size
-    #dataset always grain
-
-    batch_image_shape = (
-        total_train_batch_size,
-        128,  #seq len
-        config.mel_bands , # mel bands
-    )
-    batch_ids_shape = (
-        total_train_batch_size,
-        128, # padded text seq len
-        pipeline.text_encoder.config.hidden_size, #text hidden size
-    )
-    input_ids_dtype = jnp.float32
-
-    shaped_batch = {}
-    shaped_batch["pixel_values"] = jax.ShapeDtypeStruct(batch_image_shape, jnp.float32)
-    shaped_batch["input_ids"] = jax.ShapeDtypeStruct(batch_ids_shape, input_ids_dtype)
-    return shaped_batch
+  def post_training_steps(self, pipeline, params, train_states, msg=""):
+    pass
 
   def create_scheduler(self, pipeline, params):
-    noise_scheduler, noise_scheduler_state = FlaxDDPMScheduler.from_pretrained(
-        self.config.pretrained_model_name_or_path, revision=self.config.revision, subfolder="scheduler", dtype=jnp.float32
+    noise_scheduler, noise_scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
+        pretrained_model_name_or_path=self.config.pretrained_model_name_or_path, subfolder="scheduler", dtype=jnp.float32
+    )
+    noise_scheduler_state = noise_scheduler.set_timesteps(
+        state=noise_scheduler_state, num_inference_steps=self.config.num_inference_steps, timestep_spacing="F5"
     )
     return noise_scheduler, noise_scheduler_state
 
+  def calculate_tflops(self, pipeline):
+    per_device_tflops = calculate_f5_tflops(self.config, pipeline, self.total_train_batch_size, self.rng, train=True)
+    max_logging.log(f"JF5 per device TFLOPS: {per_device_tflops}")
+    return per_device_tflops
+
+  def start_training(self):
+
+    # Hook
+    # self.pre_training_steps()
+    # Load checkpoint - will load or create states
+    pipeline, params = self.load_checkpoint()
+
+    # create train states
+    train_states = {}
+    state_shardings = {}
+
+    # move params to accelerator
+    encoders_sharding = PositionalSharding(self.devices_array).replicate()
+    partial_device_put_replicated = partial(max_utils.device_put_replicated, sharding=encoders_sharding)
+    pipeline.clip_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.clip_encoder.params)
+    pipeline.clip_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.clip_encoder.params)
+    pipeline.t5_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.t5_encoder.params)
+    pipeline.t5_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.t5_encoder.params)
+
+    vae_state, vae_state_mesh_shardings = self.create_vae_state(
+        pipeline=pipeline, params=params, checkpoint_item_name=VAE_STATE_KEY, is_training=False
+    )
+    train_states[VAE_STATE_KEY] = vae_state
+    state_shardings[VAE_STATE_SHARDINGS_KEY] = vae_state_mesh_shardings
+
+    # Load dataset
+    data_iterator = self.load_dataset(pipeline, params, train_states)
+    if self.config.dataset_type == "grain":
+      data_iterator = self.restore_data_iterator_state(data_iterator)
+
+    # don't need this anymore, clear some memory.
+    del pipeline.t5_encoder
+
+    # evaluate shapes
+
+    F5_state, F5_state_mesh_shardings, F5_learning_rate_scheduler = self.create_F5_state(
+        # ambiguous here, but if params=None
+        # Then its 1 of 2 scenarios:
+        # 1. F5 state will be loaded directly from orbax
+        # 2. a new F5 is being trained from scratch.
+        pipeline=pipeline,
+        params=None,  # Params are loaded inside create_F5_state
+        checkpoint_item_name=F5_STATE_KEY,
+        is_training=True,
+    )
+    F5_state = jax.device_put(F5_state, F5_state_mesh_shardings)
+    train_states[F5_STATE_KEY] = F5_state
+    state_shardings[F5_STATE_SHARDINGS_KEY] = F5_state_mesh_shardings
+    # self.post_training_steps(pipeline, params, train_states, msg="before_training")
+
+    # Create scheduler
+    noise_scheduler, noise_scheduler_state = self.create_scheduler(pipeline, params)
+    pipeline.scheduler = noise_scheduler
+    train_states["scheduler"] = noise_scheduler_state
+
+    # Calculate tflops
+    per_device_tflops = self.calculate_tflops(pipeline)
+    self.per_device_tflops = per_device_tflops
+
+    data_shardings = self.get_data_shardings()
+    # Compile train_step
+    p_train_step = self.compile_train_step(pipeline, params, train_states, state_shardings, data_shardings)
+    # Start training
+    train_states = self.training_loop(
+        p_train_step, pipeline, params, train_states, data_iterator, F5_learning_rate_scheduler
+    )
+    # 6. save final checkpoint
+    # Hook
+    self.post_training_steps(pipeline, params, train_states, "after_training")
+
+  def get_shaped_batch(self, config, pipeline=None):
+    """Return the shape of the batch - this is what eval_shape would return for the
+    output of create_data_iterator_with_tokenizer, but eval_shape doesn't work, see b/306901078.
+    """
+
+    scale_factor = 16  # hardcoded in jF5.get_noise
+    h = config.resolution // scale_factor
+    w = config.resolution // scale_factor
+    c = 16
+    ph = pw = 2
+    batch_image_shape = (self.total_train_batch_size, h * w, c * ph * pw)  # b
+    img_ids_shape = (self.total_train_batch_size, (2 * h // 2) * (2 * w // 2), 3)
+    text_shape = (
+        self.total_train_batch_size,
+        config.max_sequence_length,
+        4096,  # Sequence length of text encoder, how to get this programmatically?
+    )
+    text_ids_shape = (
+        self.total_train_batch_size,
+        config.max_sequence_length,
+        3,
+    )
+    prompt_embeds_shape = (
+        self.total_train_batch_size,
+        768,  # Sequence length of clip, how to get this programmatically?
+    )
+    input_ids_dtype = self.config.activations_dtype
+
+    shaped_batch = {}
+    shaped_batch["pixel_values"] = jax.ShapeDtypeStruct(batch_image_shape, input_ids_dtype)
+    shaped_batch["text_embeds"] = jax.ShapeDtypeStruct(text_shape, input_ids_dtype)
+    shaped_batch["input_ids"] = jax.ShapeDtypeStruct(text_ids_shape, input_ids_dtype)
+    shaped_batch["prompt_embeds"] = jax.ShapeDtypeStruct(prompt_embeds_shape, input_ids_dtype)
+    shaped_batch["img_ids"] = jax.ShapeDtypeStruct(img_ids_shape, input_ids_dtype)
+    return shaped_batch
+
   def get_data_shardings(self):
     data_sharding = jax.sharding.NamedSharding(self.mesh, P(*self.config.data_sharding))
-    data_sharding = {"input_ids": data_sharding, "pixel_values": data_sharding}
+    data_sharding = {
+        "text_embeds": data_sharding,
+        "input_ids": data_sharding,
+        "prompt_embeds": data_sharding,
+        "pixel_values": data_sharding,
+        "img_ids": data_sharding,
+    }
 
     return data_sharding
 
-  def load_dataset(self, pipeline, params, train_states):
-    p_encode = None
-    p_vae_apply = None
-    rng = None
-    if self.config.dataset_type == "tf" and self.config.cache_latents_text_encoder_outputs:
-      p_encode = jax.jit(
-          partial(
-              maxdiffusion_utils.encode,
-              text_encoder=pipeline.text_encoder,
-              text_encoder_params=train_states["text_encoder_state"].params,
-          )
-      )
-      p_vae_apply = jax.jit(
-          partial(maxdiffusion_utils.vae_apply, vae=pipeline.vae, vae_params=train_states["vae_state"].params)
-      )
-      rng = self.rng
+  # adapted from max_utils.tokenize_captions_xl
+  @staticmethod
+  def tokenize_captions(examples, caption_column, encoder):
+    prompt = list(examples[caption_column])
 
-    tokenize_fn = partial(
-        maxdiffusion_utils.tokenize_captions,
-        caption_column=self.config.caption_column,
-        tokenizer=pipeline.tokenizer,
-        p_encode=p_encode,
+    prompt_embeds, pooled_prompt_embeds, text_ids = encoder(prompt, prompt)
+
+    examples["text_embeds"] = jnp.float16(prompt_embeds)
+    examples["input_ids"] = jnp.float16(text_ids)
+    examples["prompt_embeds"] = jnp.float16(pooled_prompt_embeds)
+
+    return examples
+
+  @staticmethod
+  def transform_images(examples, image_column, image_resolution, vae_encode, pack_latents, prepare_latent_imgage_ids):
+    """Preprocess images to latents."""
+    images = list(examples[image_column])
+
+    images = [
+        jax.image.resize(
+            jnp.asarray(image) / 127.5 - 1.0, [image_resolution, image_resolution, 3], method="bilinear", antialias=True
+        )
+        for image in images
+    ]
+
+    images = jnp.stack(images, axis=0, dtype=jnp.float16)
+    batch_size = 8
+    num_batches = len(images) // batch_size + int(len(images) % batch_size != 0)
+    encoded_images = []
+    for i in range(num_batches):
+      batch_images = images[i * batch_size : (i + 1) * batch_size]
+      batch_images = jnp.transpose(batch_images, (0, 3, 1, 2))
+      batch_images = vae_encode(batch_images)
+      batch_images = jnp.transpose(batch_images, (0, 3, 1, 2))
+      encoded_images.append(batch_images)
+
+    images = jnp.concatenate(encoded_images, axis=0, dtype=jnp.float16)
+    b, c, h, w = images.shape
+    images = pack_latents(latents=images, batch_size=b, num_channels_latents=c, height=h, width=w)
+
+    img_ids = prepare_latent_imgage_ids(h // 2, w // 2)
+    img_ids = jnp.tile(img_ids, (b, 1, 1))
+
+    examples["pixel_values"] = jnp.float16(images)
+    examples["img_ids"] = jnp.float16(img_ids)
+
+    return examples
+
+  def load_dataset(self, pipeline, params, train_states):
+    config = self.config
+    total_train_batch_size = self.total_train_batch_size
+    mesh = self.mesh
+
+    encode_fn = partial(
+        pipeline.encode_prompt,
+        clip_tokenizer=pipeline.clip_tokenizer,
+        t5_tokenizer=pipeline.t5_tokenizer,
+        clip_text_encoder=pipeline.clip_encoder,
+        t5_text_encoder=pipeline.t5_encoder,
+        encode_in_batches=True,
+        encode_batch_size=16,
     )
+    pack_latents_p = partial(pipeline.pack_latents)
+    prepare_latent_image_ids_p = partial(pipeline.prepare_latent_image_ids)
+    vae_encode_p = partial(pipeline.vae_encode, vae=pipeline.vae, state=train_states["vae_state"])
+
+    tokenize_fn = partial(F5Trainer.tokenize_captions, caption_column=config.caption_column, encoder=encode_fn)
     image_transforms_fn = partial(
-        maxdiffusion_utils.transform_images,
-        image_column=self.config.image_column,
-        image_resolution=self.config.resolution,
-        rng=rng,
-        global_batch_size=self.total_train_batch_size,
-        p_vae_apply=p_vae_apply,
+        F5Trainer.transform_images,
+        image_column=config.image_column,
+        image_resolution=config.resolution,
+        vae_encode=vae_encode_p,
+        pack_latents=pack_latents_p,
+        prepare_latent_imgage_ids=prepare_latent_image_ids_p,
     )
+
     data_iterator = make_data_iterator(
-        self.config,
+        config,
         jax.process_index(),
         jax.process_count(),
-        self.mesh,
-        self.total_train_batch_size,
+        mesh,
+        total_train_batch_size,
         tokenize_fn=tokenize_fn,
         image_transforms_fn=image_transforms_fn,
     )
+
     return data_iterator
 
   def compile_train_step(self, pipeline, params, train_states, state_shardings, data_shardings):
     self.rng, train_rngs = jax.random.split(self.rng)
+    guidance_vec = jnp.full((self.total_train_batch_size,), self.config.guidance_scale, dtype=self.config.activations_dtype)
     with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       p_train_step = jax.jit(
-          partial(_train_step, pipeline=pipeline, params=params, config=self.config),
+          partial(
+              _train_step,
+              guidance_vec=guidance_vec,
+              pipeline=pipeline,
+              scheduler=train_states["scheduler"],
+              config=self.config,
+          ),
           in_shardings=(
-              state_shardings["unet_state_shardings"],
-              state_shardings["vae_state_shardings"],
-              None,
+              state_shardings["F5_state_shardings"],
               data_shardings,
               None,
           ),
-          out_shardings=(state_shardings["unet_state_shardings"], None, None, None),
+          out_shardings=(state_shardings["F5_state_shardings"], None, None),
           donate_argnums=(0,),
       )
       max_logging.log("Precompiling...")
       s = time.time()
       dummy_batch = self.get_shaped_batch(self.config, pipeline)
-      p_train_step = p_train_step.lower(
-          train_states["unet_state"], train_states["vae_state"], train_states["text_encoder_state"], dummy_batch, train_rngs
-      )
+      p_train_step = p_train_step.lower(train_states[F5_STATE_KEY], dummy_batch, train_rngs)
       p_train_step = p_train_step.compile()
       max_logging.log(f"Compile time: {(time.time() - s )}")
       return p_train_step
 
   def training_loop(self, p_train_step, pipeline, params, train_states, data_iterator, unet_learning_rate_scheduler):
-    writer = max_utils.initialize_summary_writer(self.config)
-    unet_state = train_states["unet_state"]
-    vae_state = train_states["vae_state"]
-    text_encoder_state = train_states["text_encoder_state"]
 
-    num_model_parameters = max_utils.calculate_num_params_from_pytree(unet_state.params)
+    writer = max_utils.initialize_summary_writer(self.config)
+    F5_state = train_states[F5_STATE_KEY]
+    num_model_parameters = max_utils.calculate_num_params_from_pytree(F5_state.params)
 
     max_utils.add_text_to_summary_writer("number_model_parameters", str(num_model_parameters), writer)
-    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
+    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ.get("LIBTPU_INIT_ARGS", ""), writer)
     max_utils.add_config_to_summary_writer(self.config, writer)
 
     if jax.process_index() == 0:
@@ -180,158 +336,96 @@ class F5Trainer(BaseF5Trainer):
     last_profiling_step = np.clip(
         first_profiling_step + self.config.profiler_steps - 1, first_profiling_step, self.config.max_train_steps - 1
     )
-
-    start_step = train_utils.get_first_step(train_states["unet_state"])
+    start_step = get_first_step(train_states[F5_STATE_KEY])
     _, train_rngs = jax.random.split(self.rng)
-
+    times = []
     for step in np.arange(start_step, self.config.max_train_steps):
       if self.config.enable_profiler and step == first_profiling_step:
         max_utils.activate_profiler(self.config)
 
-      example_batch = train_utils.load_next_batch(data_iterator, example_batch, self.config)
+      example_batch = load_next_batch(data_iterator, example_batch, self.config)
+      example_batch = {key: jnp.asarray(value, dtype=self.config.activations_dtype) for key, value in example_batch.items()}
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        unet_state, text_encoder_state, train_metric, train_rngs = p_train_step(
-            unet_state, vae_state, text_encoder_state, example_batch, train_rngs
-        )
+        with self.mesh:
+          F5_state, train_metric, train_rngs = p_train_step(F5_state, example_batch, train_rngs)
+
+      samples_count = self.total_train_batch_size * (step + 1)
       new_time = datetime.datetime.now()
 
-      train_utils.record_scalar_metrics(
+      record_scalar_metrics(
           train_metric, new_time - last_step_completion, self.per_device_tflops, unet_learning_rate_scheduler(step)
       )
       if self.config.write_metrics:
-        train_utils.write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
+        write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
+      times.append(new_time - last_step_completion)
       last_step_completion = new_time
 
-      if step != 0 and self.config.checkpoint_every != -1 and step % self.config.checkpoint_every == 0:
-        train_states["unet_state"] = unet_state
-        train_states["vae_state"] = vae_state
-        train_states["text_encoder"] = text_encoder_state
-        self.save_checkpoint(step, pipeline, params, train_states, data_iterator)
-
-      if self.checkpoint_manager.reached_preemption(step):
-        self.checkpoint_manager.wait_until_finished()
-        sys.exit()
+      if step != 0 and self.config.checkpoint_every != -1 and samples_count % self.config.checkpoint_every == 0:
+        max_logging.log(f"Saving checkpoint for step {step}")
+        train_states[F5_STATE_KEY] = F5_state
+        self.save_checkpoint(step, pipeline, train_states)
 
       if self.config.enable_profiler and step == last_profiling_step:
         max_utils.deactivate_profiler(self.config)
 
-    if self.config.write_metrics:
-      train_utils.write_metrics(
-          writer, local_metrics_file, running_gcs_metrics, train_metric, self.config.max_train_steps - 1, self.config
-      )
-
-    train_states["unet_state"] = unet_state
-    train_states["vae_state"] = vae_state
-    train_states["text_encoder"] = text_encoder_state
-    # save the inference states of the last checkpoint so they can be easily loaded during gen.
-    self.save_checkpoint(self.config.max_train_steps - 1, pipeline, params, train_states, data_iterator)
-    self.checkpoint_manager.wait_until_finished()
+    train_states[F5_STATE_KEY] = F5_state
+    if len(times) > 0:
+      max_logging.log(f"Average time per step: {sum(times[2:], datetime.timedelta(0)) / len(times[2:])}")
+    if self.config.save_final_checkpoint:
+      max_logging.log(f"Saving checkpoint for step {step}")
+      self.save_checkpoint(step, pipeline, train_states)
+      self.checkpoint_manager.wait_until_finished()
+    return train_states
 
 
-def _train_step(unet_state, vae_state, text_encoder_state, batch, train_rng, pipeline, params, config):
+def _train_step(F5_state, batch, train_rng, guidance_vec, pipeline, scheduler, config):
   _, gen_dummy_rng = jax.random.split(train_rng)
   sample_rng, timestep_bias_rng, new_train_rng = jax.random.split(gen_dummy_rng, 3)
-
-  if config.train_text_encoder:
-    state_params = {"text_encoder": text_encoder_state.params, "unet": unet_state.params}
-  else:
-    state_params = {"unet": unet_state.params}
+  state_params = {F5_STATE_KEY: F5_state.params}
 
   def compute_loss(state_params):
-    if config.dataset_type == "tf" and config.cache_latents_text_encoder_outputs:
-      latents = batch["pixel_values"]
-      encoder_hidden_states = batch["input_ids"]
-    elif config.dataset_type in ("tfrecord", "grain"):
-      latents = FlaxDiagonalGaussianDistribution(batch["pixel_values"]).sample(sample_rng)
-      latents = jnp.transpose(latents, (0, 3, 1, 2))
-      latents = latents * pipeline.vae.config.scaling_factor
-      encoder_hidden_states = batch["input_ids"]
-    else:
-      # Convert images to latent space
-      vae_outputs = pipeline.vae.apply(
-          {"params": vae_state.params}, batch["pixel_values"], deterministic=True, method=pipeline.vae.encode
-      )
-      latents = vae_outputs.latent_dist.sample(sample_rng)
-      # (NHWC) -> (NCHW)
-      latents = jnp.transpose(latents, (0, 3, 1, 2))
-      latents = latents * pipeline.vae.config.scaling_factor
-
-      # Get the text embedding for conditioning
-      if config.train_text_encoder:
-        encoder_hidden_states = maxdiffusion_utils.encode(
-            batch["input_ids"], pipeline.text_encoder, state_params["text_encoder"]
-        )
-      else:
-        encoder_hidden_states = maxdiffusion_utils.encode(
-            batch["input_ids"], pipeline.text_encoder, text_encoder_state.params
-        )
+    latents = batch["pixel_values"]
+    text_embeds_ids = batch["input_ids"]
+    text_embeds = batch["text_embeds"]
+    prompt_embeds = batch["prompt_embeds"]
+    img_ids = batch["img_ids"]
 
     # Sample noise that we'll add to the latents
     noise_rng, timestep_rng = jax.random.split(sample_rng)
-    noise = jax.random.normal(noise_rng, latents.shape)
+    noise = jax.random.normal(
+        key=noise_rng,
+        shape=latents.shape,
+        dtype=latents.dtype,
+    )
     # Sample a random timestep for each image
     bsz = latents.shape[0]
-    if config.timestep_bias["strategy"] == "none":
-      timesteps = jax.random.randint(
-          timestep_rng,
-          (bsz,),
-          0,
-          pipeline.scheduler.config.num_train_timesteps,
-      )
-    else:
-      weights = train_utils.generate_timestep_weights(config, pipeline.scheduler.config.num_train_timesteps)
-      timesteps = jax.random.categorical(timestep_bias_rng, logits=jnp.log(weights), shape=(bsz,))
+    timesteps = jax.random.randint(timestep_rng, shape=(bsz,), minval=0, maxval=len(scheduler.timesteps) - 1)
+    noisy_latents = pipeline.scheduler.add_noise(scheduler, latents, noise, timesteps, F5=True)
 
-    # Add noise to the latents according to the noise magnitude at each timestep
-    # (this is the forward diffusion process)
-    noisy_latents = pipeline.scheduler.add_noise(params["scheduler"], latents, noise, timesteps)
-    # TODO - laion dataset was prepared with an extra dim.
-    # need to preprocess the dataset with dim removed.
-    if len(encoder_hidden_states.shape) == 4:
-      encoder_hidden_states = jnp.squeeze(encoder_hidden_states)
-
-    # Predict the noise residual and compute loss
-    model_pred = pipeline.unet.apply(
-        {"params": state_params["unet"]}, noisy_latents, timesteps, encoder_hidden_states, train=True
+    model_pred = pipeline.F5.apply(
+        {"params": state_params[F5_STATE_KEY]},
+        hidden_states=noisy_latents,
+        img_ids=img_ids,
+        encoder_hidden_states=text_embeds,
+        txt_ids=text_embeds_ids,
+        timestep=scheduler.timesteps[timesteps],
+        guidance=guidance_vec,
+        pooled_projections=prompt_embeds,
     ).sample
 
-    # Get the target for loss depending on the prediction type
-    if pipeline.scheduler.config.prediction_type == "epsilon":
-      target = noise
-    elif pipeline.scheduler.config.prediction_type == "v_prediction":
-      target = pipeline.scheduler.get_velocity(params["scheduler"], latents, noise, timesteps)
-    else:
-      raise ValueError(f"Unknown prediction type {pipeline.scheduler.config.prediction_type}")
+    target = noise - latents
     loss = (target - model_pred) ** 2
 
-    # snr
-    if config.snr_gamma > 0:
-      snr = jnp.array(train_utils.compute_snr(timesteps, params["scheduler"]))
-      snr_loss_weights = jnp.where(snr < config.snr_gamma, snr, jnp.ones_like(snr) * config.snr_gamma)
-      if pipeline.noise_scheduler.config.prediction_type == "epsilon":
-        snr_loss_weights = snr_loss_weights / snr
-      elif pipeline.noise_scheduler.config.prediction_type == "v_prediction":
-        snr_loss_weights = snr_loss_weights / (snr + 1)
-      loss = loss * snr_loss_weights[:, None, None, None]
-
-    loss = loss.mean()
+    loss = jnp.mean(loss)
 
     return loss
 
   grad_fn = jax.value_and_grad(compute_loss)
   loss, grad = grad_fn(state_params)
 
-  if config.max_grad_norm > 0:
-    grad, _ = optax.clip_by_global_norm(config.max_grad_norm).update(grad, unet_state, None)
-
-  new_state = unet_state.apply_gradients(grads=grad["unet"])
-
-  if config.train_text_encoder:
-    new_text_encoder_state = text_encoder_state.apply_gradients(grads=grad["text_encoder"])
-  else:
-    new_text_encoder_state = text_encoder_state
+  new_state = F5_state.apply_gradients(grads=grad[F5_STATE_KEY])
 
   metrics = {"scalar": {"learning/loss": loss}, "scalars": {}}
 
-  return new_state, new_text_encoder_state, metrics, new_train_rng
+  return new_state, metrics, new_train_rng
