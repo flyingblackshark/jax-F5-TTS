@@ -36,5 +36,4 @@ jieba
 pypinyin
 librosa
 jax_vocos
-fastapi==0.112.4
 gradio
