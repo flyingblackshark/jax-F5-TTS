@@ -37,8 +37,8 @@ MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation com
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
-BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
-MAX_CHUNKS = BUCKET_SIZES[-1]
+# BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
+# MAX_CHUNKS = BUCKET_SIZES[-1]
 # ==========================
 
 # --- JAX/Model Setup (Global Scope for Gradio) ---
@@ -264,6 +264,9 @@ def generate_audio(
     num_chunks = len(gen_text_batches)
     max_logging.log(f"Split generation text into {num_chunks} chunks.")
 
+
+    MAX_CHUNKS = global_config.bucket_sizes[-1]
+    BUCKET_SIZES = global_config.bucket_sizes
     # === NEW: Batch Size Bucketing Logic ===
     if num_chunks == 0:
          raise gr.Error("Text processing resulted in zero valid chunks. Try different text.")
@@ -758,6 +761,7 @@ def setup_models_and_state(config):
     def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
         return text_encoder.apply({"params": params},text_ids,text_decoder_segment_ids,rngs=rngs)
     global_jitted_text_encode_funcs = {}
+    BUCKET_SIZES = global_config.bucket_sizes
     # Compile it once
     for bucket in BUCKET_SIZES:
         # global_jitted_text_encode_funcs[bucket] = jax.jit(
@@ -956,7 +960,7 @@ def main(argv: Sequence[str]) -> None:
     """
     with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
         gr.Markdown("## F5 Text-to-Speech Synthesis")
-        gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
+        #gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
 
         with gr.Row():
             with gr.Column():

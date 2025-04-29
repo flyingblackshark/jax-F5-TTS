@@ -32,8 +32,8 @@ MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation com
 
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
-BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
-MAX_CHUNKS = BUCKET_SIZES[-1]
+# BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
+# MAX_CHUNKS = BUCKET_SIZES[-1]
 # ==========================
 
 # --- JAX/Model Setup (Global Scope for Gradio) ---
@@ -326,7 +326,7 @@ def setup_models_and_state(config):
         return text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
     global_jitted_text_encode_funcs = {}
     # Compile it once
-    for bucket in BUCKET_SIZES:
+    for bucket in config.bucket_sizes:
         global_jitted_text_encode_funcs[bucket] = jax.jit(
             wrap_text_encoder_apply,
             in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
@@ -376,7 +376,7 @@ def setup_models_and_state(config):
         return vocos_model.apply(params,x,rngs=rngs)
     global_jitted_vocos_apply_funcs = {}
     # Compile it once
-    for bucket in BUCKET_SIZES:
+    for bucket in config.bucket_sizes:
         global_jitted_vocos_apply_funcs[bucket] = jax.jit(
             wrap_text_encoder_apply,
             in_shardings=vocos_apply_in_shardings,
@@ -441,7 +441,7 @@ def setup_models_and_state(config):
     # Optional: Compile run_inference once (can take time)
     global_p_run_inference_funcs = {}
     try:
-        for bucket in BUCKET_SIZES:
+        for bucket in config.bucket_sizes:
             global_p_run_inference_funcs[bucket] = jax.jit(
                 partial_run_inference,
                 static_argnums=(), # No static args in the partial itself anymore
