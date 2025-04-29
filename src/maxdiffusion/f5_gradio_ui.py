@@ -867,7 +867,7 @@ def main(argv: Sequence[str]) -> None:
     """
     with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
         gr.Markdown("## F5 Text-to-Speech Synthesis")
-        gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
+        #gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
 
         with gr.Row():
             with gr.Column():
@@ -958,6 +958,6 @@ if __name__ == "__main__":
   # data_sharding: ['data'] # Sharding axis name for batch dim
   # logical_axis_rules: [['batch', 'data']] # Example rule
   # gradio_share: False # Set to True to create public link (use with caution)
-  jax.config.update("jax_explain_cache_misses", True)
-  jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
+  #jax.config.update("jax_explain_cache_misses", True)
+  #jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
   app.run(main)
