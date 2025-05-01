@@ -257,7 +257,7 @@ def generate_audio(
 
     # Estimate max characters per chunk, ensuring it's positive
     # Use a slightly higher estimate chars_per_sec to be conservative
-    estimated_max_chars = max(10, int(chars_per_sec_ref * max_gen_duration_sec * 0.8)) # 80% buffer
+    estimated_max_chars = max(10, int(chars_per_sec_ref * max_gen_duration_sec * 0.6)) # 60% buffer
     max_logging.log(f"Reference: {ref_duration_sec:.1f}s, {len(ref_text)} chars. Estimated max chars/chunk: {estimated_max_chars}")
 
     gen_text_batches = chunk_text(gen_text, max_chars=estimated_max_chars)
