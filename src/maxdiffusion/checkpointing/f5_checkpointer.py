@@ -74,8 +74,8 @@ class F5Checkpointer(ABC):
     tx = max_utils.create_optimizer(config, learning_rate_scheduler)
     return tx, learning_rate_scheduler
 
-  def create_F5_state(self, pipeline, params, checkpoint_item_name, is_training):
-    transformer = pipeline.F5
+  def create_f5_state(self, pipeline, params, checkpoint_item_name, is_training):
+    transformer = pipeline.f5
 
     tx, learning_rate_scheduler = None, None
     if is_training:
@@ -86,14 +86,14 @@ class F5Checkpointer(ABC):
     transformer_eval_params = transformer.init_weights(
         rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
     )
-
-    transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
+    transformer_params = transformer_eval_params
+    #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
 
     weights_init_fn = functools.partial(
-        pipeline.F5.init_weights, rngs=self.rng, max_sequence_length=self.config.max_sequence_length
+        pipeline.f5.init_weights, rngs=self.rng, max_sequence_length=self.config.max_sequence_length
     )
-    F5_state, state_mesh_shardings = max_utils.setup_initial_state(
-        model=pipeline.F5,
+    f5_state, state_mesh_shardings = max_utils.setup_initial_state(
+        model=pipeline.f5,
         tx=tx,
         config=self.config,
         mesh=self.mesh,
@@ -103,10 +103,10 @@ class F5Checkpointer(ABC):
         checkpoint_item=checkpoint_item_name,
         training=is_training,
     )
-    if not self.config.train_new_F5:
-      F5_state = F5_state.replace(params=transformer_params)
-      F5_state = jax.device_put(F5_state, state_mesh_shardings)
-    return F5_state, state_mesh_shardings, learning_rate_scheduler
+    if not self.config.train_new_f5:
+      f5_state = f5_state.replace(params=transformer_params)
+      f5_state = jax.device_put(f5_state, state_mesh_shardings)
+    return f5_state, state_mesh_shardings, learning_rate_scheduler
 
   def create_vae_state(self, pipeline, params, checkpoint_item_name, is_training=False):
 
@@ -255,26 +255,25 @@ class F5Checkpointer(ABC):
         context = nullcontext()
 
       with context:
-        clip_encoder = FlaxCLIPTextModel.from_pretrained(
-            self.config.clip_model_name_or_path, dtype=self.config.weights_dtype
-        )
-        clip_tokenizer = CLIPTokenizer.from_pretrained(self.config.clip_model_name_or_path, max_length=77, use_fast=True)
-        t5_encoder = FlaxT5EncoderModel.from_pretrained(
-            self.config.t5xxl_model_name_or_path, dtype=self.config.weights_dtype
-        )
-        t5_tokenizer = AutoTokenizer.from_pretrained(
-            self.config.t5xxl_model_name_or_path, max_length=self.config.max_sequence_length, use_fast=True
-        )
+        # clip_encoder = FlaxCLIPTextModel.from_pretrained(
+        #     self.config.clip_model_name_or_path, dtype=self.config.weights_dtype
+        # )
+        # clip_tokenizer = CLIPTokenizer.from_pretrained(self.config.clip_model_name_or_path, max_length=77, use_fast=True)
+        # t5_encoder = FlaxT5EncoderModel.from_pretrained(
+        #     self.config.t5xxl_model_name_or_path, dtype=self.config.weights_dtype
+        # )
+        # t5_tokenizer = AutoTokenizer.from_pretrained(
+        #     self.config.t5xxl_model_name_or_path, max_length=self.config.max_sequence_length, use_fast=True
+        # )
 
-        vae = FlaxAutoencoderKL.from_config(
-            model_configs[0]["vae_config"],
-            dtype=self.config.activations_dtype,
-            weights_dtype=self.config.weights_dtype,
-            from_pt=self.config.from_pt,
-        )
+        # vae = FlaxAutoencoderKL.from_config(
+        #     model_configs[0]["vae_config"],
+        #     dtype=self.config.activations_dtype,
+        #     weights_dtype=self.config.weights_dtype,
+        #     from_pt=self.config.from_pt,
+        # )
 
-        transformer = F5Transformer2DModel.from_config(
-            model_configs[0]["F5_config"],
+        transformer = F5Transformer2DModel(
             mesh=self.mesh,
             split_head_dim=self.config.split_head_dim,
             attention_kernel=self.config.attention,
@@ -286,11 +285,6 @@ class F5Checkpointer(ABC):
         )
 
         pipeline = F5Pipeline(
-            t5_encoder,
-            clip_encoder,
-            vae,
-            t5_tokenizer,
-            clip_tokenizer,
             transformer,
             None,
             dtype=self.config.activations_dtype,

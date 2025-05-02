@@ -61,15 +61,6 @@ class F5Trainer(F5Checkpointer):
   def post_training_steps(self, pipeline, params, train_states, msg=""):
     pass
 
-  def create_scheduler(self, pipeline, params):
-    noise_scheduler, noise_scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
-        pretrained_model_name_or_path=self.config.pretrained_model_name_or_path, subfolder="scheduler", dtype=jnp.float32
-    )
-    noise_scheduler_state = noise_scheduler.set_timesteps(
-        state=noise_scheduler_state, num_inference_steps=self.config.num_inference_steps, timestep_spacing="F5"
-    )
-    return noise_scheduler, noise_scheduler_state
-
   def calculate_tflops(self, pipeline):
     per_device_tflops = calculate_f5_tflops(self.config, pipeline, self.total_train_batch_size, self.rng, train=True)
     max_logging.log(f"JF5 per device TFLOPS: {per_device_tflops}")
@@ -89,16 +80,16 @@ class F5Trainer(F5Checkpointer):
     # move params to accelerator
     encoders_sharding = PositionalSharding(self.devices_array).replicate()
     partial_device_put_replicated = partial(max_utils.device_put_replicated, sharding=encoders_sharding)
-    pipeline.clip_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.clip_encoder.params)
-    pipeline.clip_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.clip_encoder.params)
-    pipeline.t5_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.t5_encoder.params)
-    pipeline.t5_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.t5_encoder.params)
+    # pipeline.clip_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.clip_encoder.params)
+    # pipeline.clip_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.clip_encoder.params)
+    # pipeline.t5_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.t5_encoder.params)
+    # pipeline.t5_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.t5_encoder.params)
 
-    vae_state, vae_state_mesh_shardings = self.create_vae_state(
-        pipeline=pipeline, params=params, checkpoint_item_name=VAE_STATE_KEY, is_training=False
-    )
-    train_states[VAE_STATE_KEY] = vae_state
-    state_shardings[VAE_STATE_SHARDINGS_KEY] = vae_state_mesh_shardings
+    # vae_state, vae_state_mesh_shardings = self.create_vae_state(
+    #     pipeline=pipeline, params=params, checkpoint_item_name=VAE_STATE_KEY, is_training=False
+    # )
+    # train_states[VAE_STATE_KEY] = vae_state
+    # state_shardings[VAE_STATE_SHARDINGS_KEY] = vae_state_mesh_shardings
 
     # Load dataset
     data_iterator = self.load_dataset(pipeline, params, train_states)
@@ -110,7 +101,7 @@ class F5Trainer(F5Checkpointer):
 
     # evaluate shapes
 
-    F5_state, F5_state_mesh_shardings, F5_learning_rate_scheduler = self.create_F5_state(
+    f5_state, f5_state_mesh_shardings, f5_learning_rate_scheduler = self.create_f5_state(
         # ambiguous here, but if params=None
         # Then its 1 of 2 scenarios:
         # 1. F5 state will be loaded directly from orbax
@@ -120,15 +111,15 @@ class F5Trainer(F5Checkpointer):
         checkpoint_item_name=F5_STATE_KEY,
         is_training=True,
     )
-    F5_state = jax.device_put(F5_state, F5_state_mesh_shardings)
-    train_states[F5_STATE_KEY] = F5_state
-    state_shardings[F5_STATE_SHARDINGS_KEY] = F5_state_mesh_shardings
+    f5_state = jax.device_put(f5_state, f5_state_mesh_shardings)
+    train_states[F5_STATE_KEY] = f5_state
+    state_shardings[F5_STATE_SHARDINGS_KEY] = f5_state_mesh_shardings
     # self.post_training_steps(pipeline, params, train_states, msg="before_training")
 
     # Create scheduler
-    noise_scheduler, noise_scheduler_state = self.create_scheduler(pipeline, params)
-    pipeline.scheduler = noise_scheduler
-    train_states["scheduler"] = noise_scheduler_state
+    #noise_scheduler, noise_scheduler_state = self.create_scheduler(pipeline, params)
+    #pipeline.scheduler = noise_scheduler
+    #train_states["scheduler"] = noise_scheduler_state
 
     # Calculate tflops
     per_device_tflops = self.calculate_tflops(pipeline)
@@ -139,7 +130,7 @@ class F5Trainer(F5Checkpointer):
     p_train_step = self.compile_train_step(pipeline, params, train_states, state_shardings, data_shardings)
     # Start training
     train_states = self.training_loop(
-        p_train_step, pipeline, params, train_states, data_iterator, F5_learning_rate_scheduler
+        p_train_step, pipeline, params, train_states, data_iterator, f5_learning_rate_scheduler
     )
     # 6. save final checkpoint
     # Hook
