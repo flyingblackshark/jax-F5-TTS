@@ -221,57 +221,40 @@ class F5Checkpointer(ABC):
     return pipeline, params
 
   def load_checkpoint(self, step=None, scheduler_class=None):
-
-    #model_configs = self.load_f5_configs_from_orbax(step)
-
     pipeline, params = None, {}
-
-    if model_configs:
-      if jax.device_count() == jax.local_device_count():
-        context = jax.default_device(jax.devices("cpu")[0])
-      else:
-        context = nullcontext()
-
-      with context:
-        # clip_encoder = FlaxCLIPTextModel.from_pretrained(
-        #     self.config.clip_model_name_or_path, dtype=self.config.weights_dtype
-        # )
-        # clip_tokenizer = CLIPTokenizer.from_pretrained(self.config.clip_model_name_or_path, max_length=77, use_fast=True)
-        # t5_encoder = FlaxT5EncoderModel.from_pretrained(
-        #     self.config.t5xxl_model_name_or_path, dtype=self.config.weights_dtype
-        # )
-        # t5_tokenizer = AutoTokenizer.from_pretrained(
-        #     self.config.t5xxl_model_name_or_path, max_length=self.config.max_sequence_length, use_fast=True
-        # )
-
-        # vae = FlaxAutoencoderKL.from_config(
-        #     model_configs[0]["vae_config"],
-        #     dtype=self.config.activations_dtype,
-        #     weights_dtype=self.config.weights_dtype,
-        #     from_pt=self.config.from_pt,
-        # )
-
-        transformer = F5Transformer2DModel(
-            mesh=self.mesh,
-            split_head_dim=self.config.split_head_dim,
-            attention_kernel=self.config.attention,
-            flash_block_sizes=max_utils.get_flash_block_sizes(self.config),
-            dtype=self.config.activations_dtype,
-            weights_dtype=self.config.weights_dtype,
-            precision=max_utils.get_precision(self.config),
-            from_pt=self.config.from_pt,
-        )
-
-        pipeline = F5Pipeline(
-            transformer,
-            None,
-            dtype=self.config.activations_dtype,
-            mesh=self.mesh,
-            config=self.config,
-            rng=self.rng,
-        )
-
+    if jax.device_count() == jax.local_device_count():
+      context = jax.default_device(jax.devices("cpu")[0])
     else:
-      pipeline, params = self.load_diffusers_checkpoint()
+      context = nullcontext()
+
+    with context:
+      transformer = F5Transformer2DModel(
+          mesh=self.mesh,
+          split_head_dim=self.config.split_head_dim,
+          attention_kernel=self.config.attention,
+          flash_block_sizes=max_utils.get_flash_block_sizes(self.config),
+          dtype=self.config.activations_dtype,
+          weights_dtype=self.config.weights_dtype,
+          precision=max_utils.get_precision(self.config),
+          from_pt=self.config.from_pt,
+      )
+      text_encoder = F5TextEmbedding(
+          mesh=self.mesh,
+          split_head_dim=self.config.split_head_dim,
+          attention_kernel=self.config.attention,
+          flash_block_sizes=flash_block_sizes,
+          dtype=self.config.activations_dtype,
+          weights_dtype=self.config.weights_dtype,
+          precision=max_utils.get_precision(self.config),
+      )
+      pipeline = F5Pipeline(
+          transformer,
+          text_encoder,
+          None,
+          dtype=self.config.activations_dtype,
+          mesh=self.mesh,
+          config=self.config,
+          rng=self.rng,
+      )
 
     return pipeline, params
