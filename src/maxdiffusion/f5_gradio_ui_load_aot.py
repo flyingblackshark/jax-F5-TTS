@@ -683,19 +683,19 @@ def setup_models_and_state(config):
 
 
     global_transformer = F5Transformer2DModel(
+        text_dim=config.text_dim, # Make sure text_dim is in config
+        mel_dim=config.mel_dim, # Make sure mel_dim is in config
+        dim=config.latent_dim, # Make sure latent_dim is in config
+        head_dim=config.head_dim,
+        num_depth=config.num_depth,
+        num_heads=config.num_heads,
+
         mesh=mesh,
-        #latent_dim=config.latent_dim, # Make sure latent_dim is in config
-        # text_dim=config.embed_dim, # Make sure embed_dim is in config
-        # num_layers=config.num_layers, # Make sure num_layers is in config
-        # num_heads=config.num_heads, # Make sure num_heads is in config
-        # mlp_ratio=config.mlp_ratio, # Make sure mlp_ratio is in config
-        #split_head_dim=config.split_head_dim, # Optional
         attention_kernel=config.attention,
         flash_block_sizes=flash_block_sizes,
         dtype=config.activations_dtype,
         weights_dtype=config.weights_dtype,
         precision=get_precision(config),
-        #max_seq_len=global_max_sequence_length # Pass max length here
     )
     transformer = global_transformer # Local var
 
@@ -727,9 +727,9 @@ def setup_models_and_state(config):
     # conv_layers = config.get("text_conv_layers", 4)
 
     global_text_encoder = F5TextEmbedding(
-        text_num_embeds=2545, # Add 1 if using +1 shift in list_str_to_idx (or adjust tokenizer/model)
-        text_dim=512,
-        conv_layers=4,
+        text_num_embeds=config.text_num_embeds, # Add 1 if using +1 shift in list_str_to_idx (or adjust tokenizer/model)
+        text_dim=config.text_dim,
+        conv_layers=config.text_conv_layers,
         # Add other necessary params from F5TextEmbedding definition
         dtype=jnp.float32
     )

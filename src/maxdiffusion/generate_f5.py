@@ -112,9 +112,14 @@ def run(config):
     # LOAD TRANSFORMER
     flash_block_sizes = get_flash_block_sizes(config)
     transformer = F5Transformer2DModel(
+        text_dim=config.text_dim, # Make sure text_dim is in config
+        mel_dim=config.mel_dim, # Make sure mel_dim is in config
+        dim=config.latent_dim, # Make sure latent_dim is in config
+        head_dim=config.head_dim,
+        num_depth=config.num_depth,
+        num_heads=config.num_heads,
+
         mesh=mesh,
-        mlp_ratio=2,
-        #split_head_dim=config.split_head_dim,
         attention_kernel=config.attention,
         flash_block_sizes=flash_block_sizes,
         dtype=config.activations_dtype,
@@ -137,7 +142,7 @@ def run(config):
     get_memory_allocations()
     num_devices = len(jax.devices())
     data_sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
-    #data_sharding = jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), "sequence"))
+
     batch_size = 3 * num_devices
     local_speed = 1
     max_duration = 4096

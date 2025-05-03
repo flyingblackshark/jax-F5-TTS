@@ -229,32 +229,37 @@ class F5Checkpointer(ABC):
 
     with context:
       transformer = F5Transformer2DModel(
-          mesh=self.mesh,
-          split_head_dim=self.config.split_head_dim,
-          attention_kernel=self.config.attention,
-          flash_block_sizes=max_utils.get_flash_block_sizes(self.config),
-          dtype=self.config.activations_dtype,
-          weights_dtype=self.config.weights_dtype,
-          precision=max_utils.get_precision(self.config),
-          from_pt=self.config.from_pt,
-      )
-      text_encoder = F5TextEmbedding(
-          mesh=self.mesh,
-          split_head_dim=self.config.split_head_dim,
-          attention_kernel=self.config.attention,
-          flash_block_sizes=flash_block_sizes,
-          dtype=self.config.activations_dtype,
-          weights_dtype=self.config.weights_dtype,
-          precision=max_utils.get_precision(self.config),
-      )
-      pipeline = F5Pipeline(
-          transformer,
-          text_encoder,
-          None,
-          dtype=self.config.activations_dtype,
-          mesh=self.mesh,
-          config=self.config,
-          rng=self.rng,
-      )
+        text_dim=self.config.text_dim, # Make sure text_dim is in config
+        mel_dim=self.config.mel_dim, # Make sure mel_dim is in config
+        dim=self.config.latent_dim, # Make sure latent_dim is in config
+        head_dim=self.config.head_dim,
+        num_depth=self.config.num_depth,
+        num_heads=self.config.num_heads,
+
+        mesh=self.mesh,
+        attention_kernel=self.config.attention,
+        flash_block_sizes=self.config.flash_block_sizes,
+        dtype=self.config.activations_dtype,
+        weights_dtype=self.config.weights_dtype,
+        precision=max_utils.get_precision(self.config),
+    )
+    text_encoder = F5TextEmbedding(
+        text_num_embeds=self.config.text_num_embeds,
+        text_dim=self.config.text_dim,
+        conv_layers=self.config.text_conv_layers,
+        conv_mult=self.config.text_conv_mult,
+        dtype=self.config.activations_dtype,
+        weights_dtype=self.config.weights_dtype,
+        precision=max_utils.get_precision(self.config),
+    )
+    pipeline = F5Pipeline(
+        transformer,
+        text_encoder,
+        None,
+        dtype=self.config.activations_dtype,
+        mesh=self.mesh,
+        config=self.config,
+        rng=self.rng,
+    )
 
     return pipeline, params

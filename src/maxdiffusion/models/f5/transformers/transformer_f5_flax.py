@@ -339,13 +339,9 @@ class F5TextEmbedding(nn.Module):
     def __call__(self, 
                  text, 
                  #seq_len,
-                 text_decoder_segment_ids):#, drop_text=False):  # noqa: F722
+                 text_decoder_segment_ids):  # noqa: F722
         
         batch, text_len = text.shape[0], text.shape[1]
-
-        # if drop_text:  # cfg for text
-        #     text = jnp.zeros_like(text)
-
         text = self.text_embed(text)  # b n -> b n d
 
         # possible extra modeling
@@ -510,6 +506,13 @@ class RotaryEmbedding(nn.Module):
         return freqs_complex, scale_complex
     
 class F5Transformer2DModel(nn.Module):
+  text_dim:int = 512
+  mel_dim:int = 100
+  dim:int = 1024
+  head_dim:int = 64
+  num_depth:int = 22
+  num_heads:int = 16
+
   flash_min_seq_length: int = 4096
   flash_block_sizes: BlockSizes = None
   mesh: jax.sharding.Mesh = None
@@ -521,18 +524,6 @@ class F5Transformer2DModel(nn.Module):
   theta: int = 1000
   attention_kernel: str = "dot_product"
   eps = 1e-6
-
-
-  drop_text:bool = False
-  text_num_embeds:int = 2545
-  text_dim:int = 512
-  mel_dim:int = 100
-  conv_layers:int=4
-  dim:int = 1024
-  dim_head:int = 64
-  depth:int = 22
-  heads:int = 16
-
   def setup(self):
     self.time_embed = TimestepEmbedding(
             dim=self.dim,
@@ -546,15 +537,14 @@ class F5Transformer2DModel(nn.Module):
         dtype=self.dtype,
         weights_dtype=self.weights_dtype,
         precision=self.precision,)
-    #self.text_embed = TextEmbedding(self.text_num_embeds, self.text_dim, conv_layers=self.conv_layers)
-    self.rotary_embed = RotaryEmbedding(self.dim_head)
+    self.rotary_embed = RotaryEmbedding(self.head_dim)
 
     blocks = []
-    for _ in range(self.depth):
+    for _ in range(self.num_depth):
       block = F5TransformerBlock(
           dim=self.dim,
-          num_attention_heads=self.heads,
-          attention_head_dim=self.dim_head,
+          num_attention_heads=self.num_heads,
+          attention_head_dim=self.head_dim,
           attention_kernel=self.attention_kernel,
           flash_min_seq_length=self.flash_min_seq_length,
           flash_block_sizes=self.flash_block_sizes,
@@ -595,17 +585,12 @@ class F5Transformer2DModel(nn.Module):
       timestep, #time step
       decoder_segment_ids, #mask
       #text_decoder_segment_ids,#text mask
-      #drop_text:bool = False,
       #drop_audio_cond:bool = False,
       train: bool = False,
   ):
     batch, seq_len = x.shape[0], x.shape[1]
     
     t = self.time_embed(timestep)
-    #if drop_text:  # cfg for text
-    #    txt_ids = jnp.zeros_like(txt_ids)
-    #text_embed = self.text_embed(txt_ids, seq_len,decoder_segment_ids=decoder_segment_ids,text_decoder_segment_ids=text_decoder_segment_ids, drop_text=self.drop_text)
-    #text_embed = nn.with_logical_constraint(text_embed, ("activation_batch", None))
     x = self.input_embed(x,
                          cond,
                          text_embed,

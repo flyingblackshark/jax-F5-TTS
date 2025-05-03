@@ -32,13 +32,20 @@ use_ema: True
 # Flux params
 f5_name: "f5-dev"
 max_sequence_length: 4096
-latent_dim: 100
+latent_dim: 1024
+mel_dim: 100
+head_dim: 64
 text_dim: 512
+num_depth: 22
+num_heads: 16
 num_layers: 12
-num_heads: 8
 mlp_ratio: 2.
 n_mels: 100
+#text encoder
 text_conv_layers: 4
+text_conv_mult: 2
+text_num_embeds: 2545
+
 
 time_shift: True
 base_shift: 0.5
