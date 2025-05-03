@@ -28,6 +28,7 @@ from maxdiffusion.checkpointing.f5_checkpointer import (
     F5_CHECKPOINT,
     F5_STATE_KEY,
     F5_STATE_SHARDINGS_KEY,
+    F5_TEXT_ENCODER_KEY,
     # VAE_STATE_KEY,
     # VAE_STATE_SHARDINGS_KEY,
 )
@@ -55,8 +56,8 @@ class F5Trainer(F5Checkpointer):
 
     self.text_encoder_2_learning_rate_scheduler = None
 
-    if config.train_text_encoder:
-      raise ValueError("this script currently doesn't support training text_encoders")
+    # if config.train_text_encoder:
+    #   raise ValueError("this script currently doesn't support training text_encoders")
 
   def post_training_steps(self, pipeline, params, train_states, msg=""):
     pass
@@ -80,24 +81,11 @@ class F5Trainer(F5Checkpointer):
     # move params to accelerator
     encoders_sharding = PositionalSharding(self.devices_array).replicate()
     partial_device_put_replicated = partial(max_utils.device_put_replicated, sharding=encoders_sharding)
-    # pipeline.clip_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.clip_encoder.params)
-    # pipeline.clip_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.clip_encoder.params)
-    # pipeline.t5_encoder.params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pipeline.t5_encoder.params)
-    # pipeline.t5_encoder.params = jax.tree_util.tree_map(partial_device_put_replicated, pipeline.t5_encoder.params)
-
-    # vae_state, vae_state_mesh_shardings = self.create_vae_state(
-    #     pipeline=pipeline, params=params, checkpoint_item_name=VAE_STATE_KEY, is_training=False
-    # )
-    # train_states[VAE_STATE_KEY] = vae_state
-    # state_shardings[VAE_STATE_SHARDINGS_KEY] = vae_state_mesh_shardings
 
     # Load dataset
     data_iterator = self.load_dataset(pipeline, params, train_states)
     if self.config.dataset_type == "grain":
       data_iterator = self.restore_data_iterator_state(data_iterator)
-
-    # don't need this anymore, clear some memory.
-    del pipeline.t5_encoder
 
     # evaluate shapes
 
@@ -370,10 +358,13 @@ class F5Trainer(F5Checkpointer):
     return train_states
 
 
-def _train_step(F5_state, batch, train_rng, guidance_vec, pipeline, scheduler, config):
+def _train_step(f5_state,text_encoder_state, batch, train_rng, guidance_vec, pipeline, scheduler, config):
   _, gen_dummy_rng = jax.random.split(train_rng)
   sample_rng, timestep_bias_rng, new_train_rng = jax.random.split(gen_dummy_rng, 3)
-  state_params = {F5_STATE_KEY: F5_state.params}
+  if config.train_text_encoder:
+    state_params = {F5_TEXT_ENCODER_KEY: text_encoder_state.params, F5_STATE_KEY:f5_state.params}
+  else:
+    state_params = {F5_STATE_KEY:f5_state.params}
 
   def compute_loss(state_params):
     latents = batch["pixel_values"]
@@ -394,7 +385,7 @@ def _train_step(F5_state, batch, train_rng, guidance_vec, pipeline, scheduler, c
     timesteps = jax.random.randint(timestep_rng, shape=(bsz,), minval=0, maxval=len(scheduler.timesteps) - 1)
     noisy_latents = pipeline.scheduler.add_noise(scheduler, latents, noise, timesteps, F5=True)
 
-    model_pred = pipeline.F5.apply(
+    model_pred = pipeline.f5.apply(
         {"params": state_params[F5_STATE_KEY]},
         hidden_states=noisy_latents,
         img_ids=img_ids,
@@ -415,7 +406,7 @@ def _train_step(F5_state, batch, train_rng, guidance_vec, pipeline, scheduler, c
   grad_fn = jax.value_and_grad(compute_loss)
   loss, grad = grad_fn(state_params)
 
-  new_state = F5_state.apply_gradients(grads=grad[F5_STATE_KEY])
+  new_state = f5_state.apply_gradients(grads=grad[F5_STATE_KEY])
 
   metrics = {"scalar": {"learning/loss": loss}, "scalars": {}}
 

@@ -30,7 +30,7 @@ from maxdiffusion.utils import logging
 from ...models import FlaxAutoencoderKL
 from ...schedulers import (FlaxEulerDiscreteScheduler)
 from ..pipeline_flax_utils import FlaxDiffusionPipeline
-from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5Transformer2DModel
+from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5Transformer2DModel,F5TextEmbedding
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -43,8 +43,9 @@ class F5Pipeline(FlaxDiffusionPipeline):
 
   def __init__(
       self,
-      F5: F5Transformer2DModel,
-      scheduler: FlaxEulerDiscreteScheduler,
+      f5: F5Transformer2DModel,
+      text_encoder: F5TextEmbedding,
+      #scheduler: FlaxEulerDiscreteScheduler,
       dtype: jnp.dtype = jnp.float32,
       mesh: Optional[Any] = None,
       config: Optional[Any] = None,
@@ -53,8 +54,8 @@ class F5Pipeline(FlaxDiffusionPipeline):
     super().__init__()
     self.dtype = dtype
     self.register_modules(
-        F5=F5,
-        scheduler=scheduler,
+        f5=f5,
+        text_encoder=text_encoder,
     )
     self.mesh = mesh
     self._config = config

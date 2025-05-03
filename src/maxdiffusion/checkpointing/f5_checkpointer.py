@@ -27,7 +27,7 @@ from maxdiffusion import (
     FlaxAutoencoderKL,
     max_logging,
 )
-from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5Transformer2DModel
+from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5Transformer2DModel,F5TextEmbedding
 from ..pipelines.f5.f5_pipeline import F5Pipeline
 
 #from transformers import (CLIPTokenizer, FlaxCLIPTextModel, FlaxT5EncoderModel, AutoTokenizer)
@@ -41,6 +41,7 @@ _CHECKPOINT_FORMAT_ORBAX = "CHECKPOINT_FORMAT_ORBAX"
 F5_STATE_KEY = "F5_state"
 F5_TRANSFORMER_PARAMS_KEY = "F5_transformer_params"
 F5_STATE_SHARDINGS_KEY = "F5_state_shardings"
+F5_TEXT_ENCODER_KEY = "F5_text_encoder"
 #F5_VAE_PARAMS_KEY = "F5_vae"
 #VAE_STATE_KEY = "vae_state"
 #VAE_STATE_SHARDINGS_KEY = "vae_state_shardings"
@@ -107,23 +108,7 @@ class F5Checkpointer(ABC):
       f5_state = f5_state.replace(params=transformer_params)
       f5_state = jax.device_put(f5_state, state_mesh_shardings)
     return f5_state, state_mesh_shardings, learning_rate_scheduler
-
-  def create_vae_state(self, pipeline, params, checkpoint_item_name, is_training=False):
-
-    # Currently VAE training is not supported.
-    weights_init_fn = functools.partial(pipeline.vae.init_weights, rng=self.rng)
-    return max_utils.setup_initial_state(
-        model=pipeline.vae,
-        tx=None,
-        config=self.config,
-        mesh=self.mesh,
-        weights_init_fn=weights_init_fn,
-        model_params=params.get("F5_vae", None),
-        checkpoint_manager=self.checkpoint_manager,
-        checkpoint_item=checkpoint_item_name,
-        training=is_training,
-    )
-
+  
   def restore_data_iterator_state(self, data_iterator):
     if (
         self.config.dataset_type == "grain"
@@ -147,18 +132,18 @@ class F5Checkpointer(ABC):
     self.checkpoint_format = checkpoint_format
 
   def save_checkpoint(self, train_step, pipeline, train_states):
-    def config_to_json(model_or_config):
-      return json.loads(model_or_config.to_json_string())
+    # def config_to_json(model_or_config):
+    #   return json.loads(model_or_config.to_json_string())
 
     items = {
-        "F5_config": ocp.args.JsonSave(config_to_json(pipeline.F5)),
-        "vae_config": ocp.args.JsonSave(config_to_json(pipeline.vae)),
-        "scheduler_config": ocp.args.JsonSave(config_to_json(pipeline.scheduler)),
+        #"f5_config": ocp.args.JsonSave(config_to_json(pipeline.f5)),
+        #"vae_config": ocp.args.JsonSave(config_to_json(pipeline.vae)),
+        #"scheduler_config": ocp.args.JsonSave(config_to_json(pipeline.scheduler)),
     }
 
     items[F5_STATE_KEY] = ocp.args.PyTreeSave(train_states[F5_STATE_KEY])
-    items["vae_state"] = ocp.args.PyTreeSave(train_states["vae_state"])
-    items["scheduler"] = ocp.args.PyTreeSave(train_states["scheduler"])
+    #items["vae_state"] = ocp.args.PyTreeSave(train_states["vae_state"])
+    #items["scheduler"] = ocp.args.PyTreeSave(train_states["scheduler"])
 
     self.checkpoint_manager.save(train_step, args=ocp.args.Composite(**items))
 
@@ -166,7 +151,7 @@ class F5Checkpointer(ABC):
 
     self.checkpoint_format = _CHECKPOINT_FORMAT_ORBAX
 
-  def load_F5_configs_from_orbax(self, step):
+  def load_f5_configs_from_orbax(self, step):
     max_logging.log("Restoring stable diffusion configs")
     if step is None:
       step = self.checkpoint_manager.latest_step()
@@ -174,9 +159,9 @@ class F5Checkpointer(ABC):
         return None
 
     restore_args = {
-        "F5_config": ocp.args.JsonRestore(),
-        "vae_config": ocp.args.JsonRestore(),
-        "scheduler_config": ocp.args.JsonRestore(),
+        #"f5_config": ocp.args.JsonRestore(),
+        #"vae_config": ocp.args.JsonRestore(),
+        #"scheduler_config": ocp.args.JsonRestore(),
     }
 
     return (self.checkpoint_manager.restore(step, args=ocp.args.Composite(**restore_args)), None)
@@ -190,26 +175,9 @@ class F5Checkpointer(ABC):
       context = nullcontext()
 
     with context:
-      clip_encoder = FlaxCLIPTextModel.from_pretrained(self.config.clip_model_name_or_path, dtype=self.config.weights_dtype)
-      clip_tokenizer = CLIPTokenizer.from_pretrained(self.config.clip_model_name_or_path, max_length=77, use_fast=True)
-      t5_encoder = FlaxT5EncoderModel.from_pretrained(self.config.t5xxl_model_name_or_path, dtype=self.config.weights_dtype)
-      t5_tokenizer = AutoTokenizer.from_pretrained(
-          self.config.t5xxl_model_name_or_path, max_length=self.config.max_sequence_length, use_fast=True
-      )
-
-      vae, vae_params = FlaxAutoencoderKL.from_pretrained(
-          self.config.pretrained_model_name_or_path,
-          subfolder="vae",
-          from_pt=True,
-          use_safetensors=True,
-          dtype=self.config.weights_dtype,
-      )
-
       # loading from pretrained here causes a crash when trying to compile the model
       # Failed to load HSACO: HIP_ERROR_NoBinaryForGpu
-      transformer = F5Transformer2DModel.from_config(
-          self.config.pretrained_model_name_or_path,
-          subfolder="transformer",
+      transformer = F5Transformer2DModel(
           mesh=self.mesh,
           split_head_dim=self.config.split_head_dim,
           attention_kernel=self.config.attention,
@@ -221,16 +189,26 @@ class F5Checkpointer(ABC):
       transformer_eval_params = transformer.init_weights(
           rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
       )
+      transformer_params = transformer_eval_params
 
-      transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
+      text_encoder = F5TextEmbedding(
+          mesh=self.mesh,
+          split_head_dim=self.config.split_head_dim,
+          attention_kernel=self.config.attention,
+          flash_block_sizes=flash_block_sizes,
+          dtype=self.config.activations_dtype,
+          weights_dtype=self.config.weights_dtype,
+          precision=max_utils.get_precision(self.config),
+      )
+      text_encoder_eval_params = text_encoder.init_weights(
+          rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
+      )
+      text_encoder_params = text_encoder_eval_params
+      #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
 
     pipeline = F5Pipeline(
-        t5_encoder,
-        clip_encoder,
-        vae,
-        t5_tokenizer,
-        clip_tokenizer,
         transformer,
+        text_encoder,
         None,
         dtype=self.config.activations_dtype,
         mesh=self.mesh,
@@ -238,13 +216,13 @@ class F5Checkpointer(ABC):
         rng=self.rng,
     )
 
-    params = {F5_VAE_PARAMS_KEY: vae_params, F5_TRANSFORMER_PARAMS_KEY: transformer_params}
+    params = {F5_TEXT_ENCODER_KEY: text_encoder_params, F5_TRANSFORMER_PARAMS_KEY: transformer_params}
 
     return pipeline, params
 
   def load_checkpoint(self, step=None, scheduler_class=None):
 
-    model_configs = self.load_F5_configs_from_orbax(step)
+    #model_configs = self.load_f5_configs_from_orbax(step)
 
     pipeline, params = None, {}
 
