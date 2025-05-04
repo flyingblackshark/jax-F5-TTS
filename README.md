@@ -9,7 +9,7 @@ vocab_name_or_path: '/xxx/vocab.txt' #place vocab here \
 compiled_path: '/xxx/jax-F5-TTS/' #AOT compiled file path
 ## Step 2
 ### Do AOT Compiling
-python src.maxdiffusion.generate_f5_aot src/maxdiffusion/configs/f5.yml
+python -m src.maxdiffusion.generate_f5_aot src/maxdiffusion/configs/f5.yml
 ## Step 3
 ### Load AOT File And Open Gradio
-python src.maxdiffusion.f5_gradio_ui_load_aot src/maxdiffusion/configs/f5.yml
+python -m src.maxdiffusion.f5_gradio_ui_load_aot src/maxdiffusion/configs/f5.yml
