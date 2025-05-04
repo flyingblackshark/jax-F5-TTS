@@ -2,7 +2,7 @@
 python -m pip install --upgrade setuptools wheel twine check-wheel-contents #TPU v5e/v5p/v6e only \
 bash setup.sh \
 python -m pip install --upgrade gradio 
-## Step 1 Edit Your Config 
+## Step 1
 ### Edit f5.yml
 pretrained_model_name_or_path: '/xxx/model_xxx.pt' #place F5 model here \
 vocab_name_or_path: '/xxx/vocab.txt' #place vocab here \
