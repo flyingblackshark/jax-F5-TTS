@@ -79,8 +79,8 @@ class F5Trainer(F5Checkpointer):
     state_shardings = {}
 
     # move params to accelerator
-    encoders_sharding = PositionalSharding(self.devices_array).replicate()
-    partial_device_put_replicated = partial(max_utils.device_put_replicated, sharding=encoders_sharding)
+    # encoders_sharding = PositionalSharding(self.devices_array).replicate()
+    # partial_device_put_replicated = partial(max_utils.device_put_replicated, sharding=encoders_sharding)
 
     # Load dataset
     data_iterator = self.load_dataset(pipeline, params, train_states)
@@ -99,7 +99,18 @@ class F5Trainer(F5Checkpointer):
         checkpoint_item_name=F5_STATE_KEY,
         is_training=True,
     )
+    text_encoder_state, text_encoder_mesh_shardings = self.create_text_encoder_state(
+        # ambiguous here, but if params=None
+        # Then its 1 of 2 scenarios:
+        # 1. F5 state will be loaded directly from orbax
+        # 2. a new F5 is being trained from scratch.
+        pipeline=pipeline,
+        params=None,  # Params are loaded inside create_F5_state
+        checkpoint_item_name=F5_TEXT_ENCODER_KEY,
+        is_training=True,
+    )
     f5_state = jax.device_put(f5_state, f5_state_mesh_shardings)
+    text_encoder_state = jax.device_put(text_encoder_state, text_encoder_mesh_shardings)
     train_states[F5_STATE_KEY] = f5_state
     state_shardings[F5_STATE_SHARDINGS_KEY] = f5_state_mesh_shardings
     # self.post_training_steps(pipeline, params, train_states, msg="before_training")
@@ -267,17 +278,17 @@ class F5Trainer(F5Checkpointer):
       p_train_step = jax.jit(
           partial(
               _train_step,
-              guidance_vec=guidance_vec,
+              #guidance_vec=guidance_vec,
               pipeline=pipeline,
-              scheduler=train_states["scheduler"],
+              #scheduler=train_states["scheduler"],
               config=self.config,
           ),
           in_shardings=(
-              state_shardings["F5_state_shardings"],
+              state_shardings["f5_state_shardings"],
               data_shardings,
               None,
           ),
-          out_shardings=(state_shardings["F5_state_shardings"], None, None),
+          out_shardings=(state_shardings["f5_state_shardings"], None, None),
           donate_argnums=(0,),
       )
       max_logging.log("Precompiling...")
@@ -358,7 +369,7 @@ class F5Trainer(F5Checkpointer):
     return train_states
 
 
-def _train_step(f5_state,text_encoder_state, batch, train_rng, guidance_vec, pipeline, scheduler, config):
+def _train_step(f5_state,text_encoder_state, batch, train_rng, pipeline, config):
   _, gen_dummy_rng = jax.random.split(train_rng)
   sample_rng, timestep_bias_rng, new_train_rng = jax.random.split(gen_dummy_rng, 3)
   if config.train_text_encoder:
@@ -383,7 +394,7 @@ def _train_step(f5_state,text_encoder_state, batch, train_rng, guidance_vec, pip
     # Sample a random timestep for each image
     bsz = latents.shape[0]
     timesteps = jax.random.randint(timestep_rng, shape=(bsz,), minval=0, maxval=len(scheduler.timesteps) - 1)
-    noisy_latents = pipeline.scheduler.add_noise(scheduler, latents, noise, timesteps, F5=True)
+    #noisy_latents = pipeline.scheduler.add_noise(scheduler, latents, noise, timesteps, F5=True)
 
     model_pred = pipeline.f5.apply(
         {"params": state_params[F5_STATE_KEY]},
@@ -391,8 +402,9 @@ def _train_step(f5_state,text_encoder_state, batch, train_rng, guidance_vec, pip
         img_ids=img_ids,
         encoder_hidden_states=text_embeds,
         txt_ids=text_embeds_ids,
-        timestep=scheduler.timesteps[timesteps],
-        guidance=guidance_vec,
+        timestep=timesteps,
+     #  timestep=scheduler.timesteps[timesteps],
+     #   guidance=guidance_vec,
         pooled_projections=prompt_embeds,
     ).sample
 

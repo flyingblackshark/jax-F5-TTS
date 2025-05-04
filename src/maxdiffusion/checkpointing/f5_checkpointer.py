@@ -38,10 +38,10 @@ from maxdiffusion.checkpointing.checkpointing_utils import (create_orbax_checkpo
 F5_CHECKPOINT = "F5_CHECKPOINT"
 _CHECKPOINT_FORMAT_ORBAX = "CHECKPOINT_FORMAT_ORBAX"
 
-F5_STATE_KEY = "F5_state"
-F5_TRANSFORMER_PARAMS_KEY = "F5_transformer_params"
-F5_STATE_SHARDINGS_KEY = "F5_state_shardings"
-F5_TEXT_ENCODER_KEY = "F5_text_encoder"
+F5_STATE_KEY = "f5_state"
+F5_TRANSFORMER_PARAMS_KEY = "f5_transformer_params"
+F5_STATE_SHARDINGS_KEY = "f5_state_shardings"
+F5_TEXT_ENCODER_KEY = "f5_text_encoder"
 #F5_VAE_PARAMS_KEY = "F5_vae"
 #VAE_STATE_KEY = "vae_state"
 #VAE_STATE_SHARDINGS_KEY = "vae_state_shardings"
@@ -74,7 +74,40 @@ class F5Checkpointer(ABC):
     )
     tx = max_utils.create_optimizer(config, learning_rate_scheduler)
     return tx, learning_rate_scheduler
+  def create_text_encoder_state(self, pipeline, params, checkpoint_item_name, is_training):
+    text_encoder = pipeline.text_encoder
 
+    tx = None
+    if is_training:
+      learning_rate = self.config.learning_rate
+
+      tx, _ = self._create_optimizer(self.config, learning_rate)
+
+    text_encoder_eval_params = text_encoder.init_weights(
+        rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
+    )
+    text_encoder_params = text_encoder_eval_params
+    #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
+
+    weights_init_fn = functools.partial(
+        pipeline.text_encoder.init_weights, rngs=self.rng, max_sequence_length=self.config.max_sequence_length
+    )
+    text_encoder_state, state_mesh_shardings = max_utils.setup_initial_state(
+        model=pipeline.text_encoder,
+        tx=tx,
+        config=self.config,
+        mesh=self.mesh,
+        weights_init_fn=weights_init_fn,
+        model_params=None,
+        checkpoint_manager=self.checkpoint_manager,
+        checkpoint_item=checkpoint_item_name,
+        training=is_training,
+    )
+    if not self.config.train_new_f5:
+      text_encoder_state = text_encoder_state.replace(params=text_encoder_params)
+      text_encoder_state = jax.device_put(text_encoder_state, state_mesh_shardings)
+    return text_encoder_state, state_mesh_shardings
+  
   def create_f5_state(self, pipeline, params, checkpoint_item_name, is_training):
     transformer = pipeline.f5
 
@@ -142,7 +175,7 @@ class F5Checkpointer(ABC):
     }
 
     items[F5_STATE_KEY] = ocp.args.PyTreeSave(train_states[F5_STATE_KEY])
-    #items["vae_state"] = ocp.args.PyTreeSave(train_states["vae_state"])
+    items[F5_TEXT_ENCODER_KEY] = ocp.args.PyTreeSave(train_states[F5_TEXT_ENCODER_KEY])
     #items["scheduler"] = ocp.args.PyTreeSave(train_states["scheduler"])
 
     self.checkpoint_manager.save(train_step, args=ocp.args.Composite(**items))
@@ -151,74 +184,74 @@ class F5Checkpointer(ABC):
 
     self.checkpoint_format = _CHECKPOINT_FORMAT_ORBAX
 
-  def load_f5_configs_from_orbax(self, step):
-    max_logging.log("Restoring stable diffusion configs")
-    if step is None:
-      step = self.checkpoint_manager.latest_step()
-      if step is None:
-        return None
+  # def load_f5_configs_from_orbax(self, step):
+  #   max_logging.log("Restoring stable diffusion configs")
+  #   if step is None:
+  #     step = self.checkpoint_manager.latest_step()
+  #     if step is None:
+  #       return None
 
-    restore_args = {
-        #"f5_config": ocp.args.JsonRestore(),
-        #"vae_config": ocp.args.JsonRestore(),
-        #"scheduler_config": ocp.args.JsonRestore(),
-    }
+  #   restore_args = {
+  #       #"f5_config": ocp.args.JsonRestore(),
+  #       #"vae_config": ocp.args.JsonRestore(),
+  #       #"scheduler_config": ocp.args.JsonRestore(),
+  #   }
 
-    return (self.checkpoint_manager.restore(step, args=ocp.args.Composite(**restore_args)), None)
+  #   return (self.checkpoint_manager.restore(step, args=ocp.args.Composite(**restore_args)), None)
 
-  def load_diffusers_checkpoint(self):
-    flash_block_sizes = max_utils.get_flash_block_sizes(self.config)
+  # def load_diffusers_checkpoint(self):
+  #   flash_block_sizes = max_utils.get_flash_block_sizes(self.config)
 
-    if jax.device_count() == jax.local_device_count():
-      context = jax.default_device(jax.devices("cpu")[0])
-    else:
-      context = nullcontext()
+  #   if jax.device_count() == jax.local_device_count():
+  #     context = jax.default_device(jax.devices("cpu")[0])
+  #   else:
+  #     context = nullcontext()
 
-    with context:
-      # loading from pretrained here causes a crash when trying to compile the model
-      # Failed to load HSACO: HIP_ERROR_NoBinaryForGpu
-      transformer = F5Transformer2DModel(
-          mesh=self.mesh,
-          split_head_dim=self.config.split_head_dim,
-          attention_kernel=self.config.attention,
-          flash_block_sizes=flash_block_sizes,
-          dtype=self.config.activations_dtype,
-          weights_dtype=self.config.weights_dtype,
-          precision=max_utils.get_precision(self.config),
-      )
-      transformer_eval_params = transformer.init_weights(
-          rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
-      )
-      transformer_params = transformer_eval_params
+  #   with context:
+  #     # loading from pretrained here causes a crash when trying to compile the model
+  #     # Failed to load HSACO: HIP_ERROR_NoBinaryForGpu
+  #     transformer = F5Transformer2DModel(
+  #         mesh=self.mesh,
+  #         split_head_dim=self.config.split_head_dim,
+  #         attention_kernel=self.config.attention,
+  #         flash_block_sizes=flash_block_sizes,
+  #         dtype=self.config.activations_dtype,
+  #         weights_dtype=self.config.weights_dtype,
+  #         precision=max_utils.get_precision(self.config),
+  #     )
+  #     transformer_eval_params = transformer.init_weights(
+  #         rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
+  #     )
+  #     transformer_params = transformer_eval_params
 
-      text_encoder = F5TextEmbedding(
-          mesh=self.mesh,
-          split_head_dim=self.config.split_head_dim,
-          attention_kernel=self.config.attention,
-          flash_block_sizes=flash_block_sizes,
-          dtype=self.config.activations_dtype,
-          weights_dtype=self.config.weights_dtype,
-          precision=max_utils.get_precision(self.config),
-      )
-      text_encoder_eval_params = text_encoder.init_weights(
-          rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
-      )
-      text_encoder_params = text_encoder_eval_params
-      #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
+  #     text_encoder = F5TextEmbedding(
+  #         mesh=self.mesh,
+  #         split_head_dim=self.config.split_head_dim,
+  #         attention_kernel=self.config.attention,
+  #         flash_block_sizes=flash_block_sizes,
+  #         dtype=self.config.activations_dtype,
+  #         weights_dtype=self.config.weights_dtype,
+  #         precision=max_utils.get_precision(self.config),
+  #     )
+  #     text_encoder_eval_params = text_encoder.init_weights(
+  #         rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
+  #     )
+  #     text_encoder_params = text_encoder_eval_params
+  #     #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
 
-    pipeline = F5Pipeline(
-        transformer,
-        text_encoder,
-        None,
-        dtype=self.config.activations_dtype,
-        mesh=self.mesh,
-        config=self.config,
-        rng=self.rng,
-    )
+  #   pipeline = F5Pipeline(
+  #       transformer,
+  #       text_encoder,
+  #       None,
+  #       dtype=self.config.activations_dtype,
+  #       mesh=self.mesh,
+  #       config=self.config,
+  #       rng=self.rng,
+  #   )
 
-    params = {F5_TEXT_ENCODER_KEY: text_encoder_params, F5_TRANSFORMER_PARAMS_KEY: transformer_params}
+  #   params = {F5_TEXT_ENCODER_KEY: text_encoder_params, F5_TRANSFORMER_PARAMS_KEY: transformer_params}
 
-    return pipeline, params
+  #   return pipeline, params
 
   def load_checkpoint(self, step=None, scheduler_class=None):
     pipeline, params = None, {}
