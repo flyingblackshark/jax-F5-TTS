@@ -82,47 +82,31 @@ def get_tokenizer(dataset_name, tokenizer: str = "custom"):
 
 def chunk_text(text, max_chars=135):
     """
-    Splits the input text into chunks based on estimated character count,
-    respecting sentence boundaries where possible.
-    Max_chars is an estimate, actual byte length might vary.
+    Splits the input text into chunks, each with a maximum number of characters.
+
+    Args:
+        text (str): The text to be split.
+        max_chars (int): The maximum number of characters per chunk.
+
+    Returns:
+        List[str]: A list of text chunks.
     """
     chunks = []
     current_chunk = ""
-    # More robust sentence splitting for English and Chinese
-    sentences = re.split(r'(?<=[.?!;；。？！])\s*', text)
-    # Filter out empty strings that can result from splitting
-    sentences = [s for s in sentences if s]
-
-    if not sentences:
-        if text: # Handle case where text has no sentence-ending punctuation
-            sentences = [text]
-        else:
-            return [] # No text, no chunks
+    # Split the text into sentences based on punctuation followed by whitespace
+    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
 
     for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
-        # Estimate length (simple char count, pinyin will expand this later)
-        if len(current_chunk) + len(sentence) < max_chars:
-            current_chunk += sentence + " " # Add space between sentences
+        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
         else:
-            # If adding the sentence exceeds max_chars
-            if current_chunk: # Add the previous chunk if it exists
+            if current_chunk:
                 chunks.append(current_chunk.strip())
-                current_chunk = sentence + " " # Start new chunk with current sentence
-            else: # Sentence itself is longer than max_chars
-                # Simple split for very long sentences (could be improved)
-                parts = [sentence[i:i+max_chars] for i in range(0, len(sentence), max_chars)]
-                chunks.extend(p.strip() + (" " if i < len(parts)-1 else "") for i, p in enumerate(parts))
-                current_chunk = "" # Reset current chunk
+            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
 
-    if current_chunk: # Add the last chunk
+    if current_chunk:
         chunks.append(current_chunk.strip())
 
-    # Filter out any potential empty chunks again
-    chunks = [c for c in chunks if c]
     return chunks
 
 def list_str_to_idx(
