@@ -33,7 +33,7 @@ from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_cha
 #jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
-MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
+#MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
@@ -250,6 +250,8 @@ def generate_audio(
     # Calculate max characters for chunking based on reference speech rate
     # Add a buffer (e.g., 20%) to handle faster speech or estimation errors
     chars_per_sec_ref = len(ref_text.encode("utf-8")) / ref_duration_sec
+
+    MAX_DURATION_SECS = global_max_sequence_length * 256 / TARGET_SR # Adjusted for hop_length
     # Estimate max duration for generated chunks based on available sequence length
     max_gen_duration_sec = MAX_DURATION_SECS - ref_duration_sec
     if max_gen_duration_sec <= 0:
