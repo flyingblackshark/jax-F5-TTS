@@ -317,6 +317,7 @@ class F5TextEmbedding(nn.Module):
     conv_layers:int=0
     conv_mult:int=2
     theta:int = 1000
+    precompute_max_pos:int = 4096
     dtype: jnp.dtype = jnp.float32
     weights_dtype: jnp.dtype = jnp.float32
     precision: jax.lax.Precision = None
@@ -325,7 +326,7 @@ class F5TextEmbedding(nn.Module):
         
         if self.conv_layers > 0:
             self.extra_modeling = True
-            self.precompute_max_pos = 4096  # ~44s of 24khz audio
+            #self.precompute_max_pos = 4096  # ~44s of 24khz audio
             self.freqs_cis = precompute_freqs_cis(self.text_dim, self.precompute_max_pos)
             self.text_blocks = [ConvNeXtV2Block(
             self.text_dim, self.text_dim * self.conv_mult,

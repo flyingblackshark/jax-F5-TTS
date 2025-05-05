@@ -727,6 +727,7 @@ def setup_models_and_state(config):
     # conv_layers = config.get("text_conv_layers", 4)
 
     global_text_encoder = F5TextEmbedding(
+        precompute_max_pos=config.max_sequence_length,
         text_num_embeds=config.text_num_embeds, # Add 1 if using +1 shift in list_str_to_idx (or adjust tokenizer/model)
         text_dim=config.text_dim,
         conv_layers=config.text_conv_layers,
