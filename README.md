@@ -1,5 +1,5 @@
 ## Preparation
-sudo apt-get update && sudo apt-get install ffmpeg -y
+sudo apt-get update && sudo apt-get install ffmpeg -y \
 python -m pip install --upgrade setuptools wheel twine check-wheel-contents #TPU v5e/v5p/v6e only \
 bash setup.sh \
 python -m pip install --upgrade gradio 
