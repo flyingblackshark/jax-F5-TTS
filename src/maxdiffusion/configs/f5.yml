@@ -99,7 +99,7 @@ norm_num_groups: 32
 train_new_unet: False
 
 # train text_encoder - Currently not supported for SDXL
-train_text_encoder: False
+train_text_encoder: True
 text_encoder_learning_rate: 4.25e-6
 
 # https://arxiv.org/pdf/2305.08891.pdf

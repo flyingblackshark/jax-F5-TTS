@@ -273,7 +273,6 @@ class F5Trainer(F5Checkpointer):
 
   def compile_train_step(self, pipeline, params, train_states, state_shardings, data_shardings):
     self.rng, train_rngs = jax.random.split(self.rng)
-    guidance_vec = jnp.full((self.total_train_batch_size,), self.config.guidance_scale, dtype=self.config.activations_dtype)
     with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       p_train_step = jax.jit(
           partial(
