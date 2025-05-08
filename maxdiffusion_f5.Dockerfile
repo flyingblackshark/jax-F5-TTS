@@ -51,8 +51,9 @@ WORKDIR /deps
 COPY . .
 
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION"
-
+RUN /root/.cache/pip install --upgrade setuptools wheel twine check-wheel-contents
 RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION}
+RUN /root/.cache/pip install --upgrade gradio
 
 # Cleanup
 RUN rm -rf /root/.cache/pip
