@@ -24,14 +24,14 @@ save_config_to_gcs: False
 log_period: 100
 
 vocoder_model_path: ''
-pretrained_model_name_or_path: '/bucket/f5/model_70000.pt'
-vocab_name_or_path: '/bucket/f5/vocab.txt'
-compiled_path: '/bucket/f5/'
+pretrained_model_name_or_path: '/root/aurora_f5_v1/model_70000.pt'
+vocab_name_or_path: '/root/aurora_f5_v1/vocab.txt'
+compiled_path: '/root/jax-F5-TTS/'
 use_ema: True
 
 # Flux params
 f5_name: "f5-dev"
-max_sequence_length: 2048
+max_sequence_length: 4096
 latent_dim: 1024
 mel_dim: 100
 head_dim: 64
