@@ -702,9 +702,13 @@ def setup_models_and_state(config):
     transformer = global_transformer # Local var
 
     # Load weights
-    transformer_params, text_encoder_params_loaded = convert_f5_state_dict_to_flax(
-        config.pretrained_model_name_or_path, use_ema=config.use_ema
-    )
+    try:
+        transformer_params, text_encoder_params_loaded = convert_f5_state_dict_to_flax(
+            config.pretrained_model_name_or_path, use_ema=config.use_ema
+        )
+        print("Successfully loaded f5 state_dict with PyTorch.")
+    except Exception as e:
+        print(f"Error loading with PyTorch: {e}")
     global_text_encoder_params = flax.core.frozen_dict.FrozenDict(text_encoder_params_loaded) # Store globally
 
     weights_init_fn = functools.partial(transformer.init_weights, rngs=rng, max_sequence_length=config.max_sequence_length, eval_only=False)
