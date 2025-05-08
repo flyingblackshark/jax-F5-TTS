@@ -25,7 +25,7 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dea
 # Install the Google Cloud SDK
 RUN apt-get update && apt-get install -y google-cloud-sdk && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get install -y ffmpeg 
+RUN apt-get update && apt-get install -y ffmpeg 
 
 # Install cloud-accelerator-diagnostics
 RUN pip install cloud-accelerator-diagnostics
