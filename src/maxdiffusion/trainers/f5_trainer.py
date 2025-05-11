@@ -33,7 +33,7 @@ from maxdiffusion.checkpointing.f5_checkpointer import (
     # VAE_STATE_SHARDINGS_KEY,
 )
 
-from maxdiffusion.input_pipeline.input_pipeline_interface import (make_data_iterator)
+from maxdiffusion.input_pipeline_f5.input_pipeline_interface import (make_data_iterator)
 
 from maxdiffusion import (max_utils, max_logging)
 

@@ -183,3 +183,4 @@ jax_cache
 .gradio
 
 f5_gradio_ui_multi_host.py
+src/maxdiffusion/configs/f5_dev.yml

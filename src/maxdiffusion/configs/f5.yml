@@ -183,10 +183,10 @@ ici_context_parallelism: 1
 
 # Dataset
 # Replace with dataset path or train_data_dir. One has to be set.
-dataset_name: 'diffusers/pokemon-gpt4-captions'
+dataset_name: 'fbs0/aurora_ds'
 train_split: 'train'
-dataset_type: 'tf'
-cache_latents_text_encoder_outputs: True
+dataset_type: 'hf'
+cache_latents_text_encoder_outputs: False
 # cache_latents_text_encoder_outputs only apply to dataset_type="tf",
 # only apply to small dataset that fits in memory
 # prepare image latents and text encoder outputs
