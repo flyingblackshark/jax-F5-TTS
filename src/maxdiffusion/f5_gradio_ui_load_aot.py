@@ -81,30 +81,6 @@ def load_compiled(shaped_batch,path,partial_train, state):
   p_func = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_func
   
-def dynamic_range_compression_jax(x, C=1, clip_val=1e-7):
-    return jnp.log(jnp.clip(x, min=clip_val) * C)
-
-def get_mel(y, n_mels=100, n_fft=1024, win_size=1024, hop_length=256, fmin=0, fmax=None, clip_val=1e-7, sampling_rate=TARGET_SR):
-    # Ensure input is JAX array
-    y = jnp.asarray(y)
-    # Ensure it's mono
-    if y.ndim > 1 and y.shape[0] > 1:
-        y = jnp.mean(y, axis=0)
-    elif y.ndim > 1:
-        y = jnp.squeeze(y, axis=0)
-
-    window = jnp.hanning(win_size)
-    spec_func = functools.partial(audax.core.functional.spectrogram, pad=0, window=window, n_fft=n_fft,
-                    hop_length=hop_length, win_length=win_size, power=1.,
-                    normalized=False, center=True, onesided=True)
-    fb = audax.core.functional.melscale_fbanks(n_freqs=(n_fft // 2) + 1, n_mels=n_mels,
-                        sample_rate=sampling_rate, f_min=fmin, f_max=fmax)
-    mel_spec_func = functools.partial(audax.core.functional.apply_melscale, melscale_filterbank=fb)
-    spec = spec_func(y)
-    spec = mel_spec_func(spec)
-    spec = dynamic_range_compression_jax(spec, clip_val=clip_val)
-    return spec
-
 # --- Core Diffusion Loop Logic (Unchanged) ---
 
 def loop_body(
@@ -180,7 +156,6 @@ def generate_audio(
     ref_text: str,
     gen_text: str,
     ref_audio_input: Tuple[int, np.ndarray] | str | None,
-    #num_inference_steps: int = 50,
     guidance_scale: float = 2.0,
     speed_factor: float = 1.0, # <-- Add speed factor parameter
     use_sway_sampling: bool = False, # <-- Add sway sampling parameter
@@ -807,7 +782,6 @@ def main(argv: Sequence[str]) -> None:
     """
     with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
         gr.Markdown("## F5 Text-to-Speech Synthesis")
-        #gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
 
         with gr.Row():
             with gr.Column():
@@ -815,7 +789,6 @@ def main(argv: Sequence[str]) -> None:
                 ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
                 gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
                 with gr.Row():
-                    #steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
                     cfg_slider = gr.Slider(minimum=1.0, maximum=10.0, value=2.0, step=0.1, label="Guidance Scale (CFG)", info="Higher values follow prompts more strictly but can reduce diversity.")
                 with gr.Row():
                     speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
