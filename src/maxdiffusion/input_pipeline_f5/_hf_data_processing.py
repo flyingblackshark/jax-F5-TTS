@@ -46,23 +46,23 @@ def make_hf_streaming_iterator(
   )
 
   ds = ds.shuffle(seed=config.seed)
-  ds = ds.select_columns([config.caption_column, config.image_column])
+  #ds = ds.select_columns([config.caption_column, config.audio_column])
 
-  if tokenize_fn:
-    ds = ds.map(
-        function=tokenize_fn,
-        batched=True,
-        batch_size=hf_batch_factor * config.total_train_batch_size,
-        remove_columns=[config.caption_column],
-    )
+  # if tokenize_fn:
+  #   ds = ds.map(
+  #       function=tokenize_fn,
+  #       batched=True,
+  #       batch_size=hf_batch_factor * config.total_train_batch_size,
+  #       remove_columns=[config.caption_column],
+  #   )
 
-  if image_transforms_fn:
-    ds = ds.map(
-        function=image_transforms_fn,
-        batched=True,
-        batch_size=hf_batch_factor * config.total_train_batch_size,
-        remove_columns=[config.image_column],
-    )
+  # if image_transforms_fn:
+  #   ds = ds.map(
+  #       function=image_transforms_fn,
+  #       batched=True,
+  #       batch_size=hf_batch_factor * config.total_train_batch_size,
+  #       remove_columns=[config.image_column],
+  #   )
 
   ds = HFDataSource(
       ds,
