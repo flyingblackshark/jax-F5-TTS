@@ -147,7 +147,6 @@ def loop_body(
         decoder_segment_ids=decoder_segment_ids,
         text_embed=text_embed_uncond,
         timestep=t_vec,
-        #drop_audio_cond=True,
     )
 
     # Classifier-Free Guidance

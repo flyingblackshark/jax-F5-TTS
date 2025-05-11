@@ -288,7 +288,6 @@ class F5Checkpointer(ABC):
     pipeline = F5Pipeline(
         transformer,
         text_encoder,
-        None,
         dtype=self.config.activations_dtype,
         mesh=self.mesh,
         config=self.config,

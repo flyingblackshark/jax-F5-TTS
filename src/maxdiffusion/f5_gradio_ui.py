@@ -385,13 +385,13 @@ def generate_audio(
     rng_embed = jax.random.key(global_config.seed + 1) # Use a different seed
     rngs_embed = {'params': rng_embed, 'dropout': rng_embed}
 
-    text_embed_cond = global_jitted_text_encode_funcs[target_batch_size]({"params": global_text_encoder_params},
+    text_embed_cond = global_jitted_text_encode_func({"params": global_text_encoder_params},
                                           text_ids,
                                           text_decoder_segment_ids,
                                          rngs_embed)
 
     # Unconditional embeddings (zero text input)
-    text_embed_uncond = global_jitted_text_encode_funcs[target_batch_size]({"params": global_text_encoder_params},
+    text_embed_uncond = global_jitted_text_encode_func({"params": global_text_encoder_params},
                                   np.zeros_like(text_ids),
                                   text_decoder_segment_ids, # Use zero mask too
                                   rngs_embed)
@@ -432,7 +432,7 @@ def generate_audio(
     # === End of Modified Timestep Calculation ===
 
     # Run inference loop (using pre-compiled partial function)
-    y_final_latents = global_p_run_inference_funcs[target_batch_size](
+    y_final_latents = global_p_run_inference_func(
         global_transformer_state, # Pass state
         latents,
         step_cond,
@@ -463,7 +463,7 @@ def generate_audio(
     rngs_vocoder = {'params': vocoder_rng, 'dropout': vocoder_rng} # Vocos might need dropout rng
     # Vocoder expects (batch, seq_len, mel_bins)
     # Apply on device
-    audio_out_jax = global_jitted_vocos_apply_funcs[target_batch_size]({"params": global_vocos_params}, out_latents, rngs_vocoder)
+    audio_out_jax = global_jitted_vocos_apply_func({"params": global_vocos_params}, out_latents, rngs_vocoder)
     audio_out_jax.block_until_ready() # Wait for vocoder to finish
 
     # Transfer *only the necessary data* to CPU
@@ -528,9 +528,9 @@ def setup_models_and_state(config):
     """
     global global_config, global_mesh, global_transformer, global_transformer_state
     global global_transformer_state_shardings, global_text_encoder, global_text_encoder_params
-    global global_jitted_text_encode_funcs, global_vocos_model, global_vocos_params
-    global global_jitted_vocos_apply_funcs, global_vocab_char_map, global_vocab_size
-    global global_p_run_inference_funcs, global_data_sharding, global_max_sequence_length
+    global global_jitted_text_encode_func, global_vocos_model, global_vocos_params
+    global global_jitted_vocos_apply_func, global_vocab_char_map, global_vocab_size
+    global global_p_run_inference_func, global_data_sharding, global_max_sequence_length
     global jitted_get_mel
 
 
@@ -695,25 +695,18 @@ def setup_models_and_state(config):
     text_encode_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim)
     def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
         return text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
-    global_jitted_text_encode_funcs = {}
-    BUCKET_SIZES = global_config.bucket_sizes
-    # Compile it once
-    for bucket in BUCKET_SIZES:
-        global_jitted_text_encode_funcs[bucket] = jax.jit(
-            wrap_text_encoder_apply,
-            in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
-            out_shardings=text_encode_out_shardings,
-            static_argnums=() # No static args in apply needed here
-        )
-        dummy_text_ids_shape = (bucket, global_max_sequence_length)
-        dummy_text_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
-        dummy_text_seg_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
-        _ = global_jitted_text_encode_funcs[bucket]({"params": global_text_encoder_params},
-                                    dummy_text_ids,
-                                    dummy_text_seg_ids,
-                                    rngs_init)
 
-    max_logging.log("Text Encoder JIT compiled.")
+
+    # Compile it once
+    global_jitted_text_encode_func = jax.jit(
+        wrap_text_encoder_apply,
+        in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
+        out_shardings=text_encode_out_shardings,
+        static_argnums=() # No static args in apply needed here
+    )
+
+
+    max_logging.log("Text Encoder JIT create.")
 
 
     # --- Load Vocoder ---
@@ -745,19 +738,14 @@ def setup_models_and_state(config):
     vocos_apply_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq) # Assuming AudioLen is like Seq dim
     def wrap_vocos_apply(params,x,rngs):
         return vocos_model.apply(params,x,rngs=rngs)
-    global_jitted_vocos_apply_funcs = {}
-    # Compile it once
-    for bucket in BUCKET_SIZES:
-        global_jitted_vocos_apply_funcs[bucket] = jax.jit(
-            wrap_vocos_apply,
-            in_shardings=vocos_apply_in_shardings,
-            out_shardings=vocos_apply_out_shardings,
-            static_argnums=()
-        )
-        dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
-        dummy_latents_vocoder = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-        _ = global_jitted_vocos_apply_funcs[bucket]({"params": global_vocos_params}, dummy_latents_vocoder, rngs_voc_init)
-    max_logging.log("Vocoder JIT compiled.")
+
+    global_jitted_vocos_apply_func = jax.jit(
+        wrap_vocos_apply,
+        in_shardings=vocos_apply_in_shardings,
+        out_shardings=vocos_apply_out_shardings,
+        static_argnums=()
+    )
+    max_logging.log("Vocoder JIT.")
 
 
     # --- Compile Inference Loop ---
@@ -803,39 +791,15 @@ def setup_models_and_state(config):
     )
     # Output sharding (final latents) - should match data sharding probably
     out_shardings_inf = latents_sharding
-
-
-
     # Optional: Compile run_inference once (can take time)
-    global_p_run_inference_funcs = {}
     try:
-        for bucket in BUCKET_SIZES:
-            global_p_run_inference_funcs[bucket] = jax.jit(
-                partial_run_inference,
-                static_argnums=(), # No static args in the partial itself anymore
-                in_shardings=in_shardings_inf,
-                out_shardings=out_shardings_inf,
-            )
-            dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
-            dummy_text_embed_shape = (bucket, global_max_sequence_length, 512)
-            dummy_text_ids_shape = (bucket, global_max_sequence_length)
-            dummy_latents = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-            dummy_cond = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-            dummy_decoder_segment_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.float32)
-            dummy_text_embed = jnp.zeros(dummy_text_embed_shape, dtype=jnp.float32)
-            dummy_c_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[:-1]
-            dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
-            _ = global_p_run_inference_funcs[bucket](
-                global_transformer_state,
-                dummy_latents,
-                dummy_cond,
-                dummy_decoder_segment_ids,
-                dummy_text_embed,
-                dummy_text_embed,
-                dummy_c_ts,
-                dummy_p_ts
-            )
 
+        global_p_run_inference_func = jax.jit(
+            partial_run_inference,
+            static_argnums=(), # No static args in the partial itself anymore
+            in_shardings=in_shardings_inf,
+            out_shardings=out_shardings_inf,
+        )
         max_logging.log("Inference loop JIT compiled.")
     except Exception as e:
         max_logging.error(f"Failed to pre-compile inference loop: {e}")

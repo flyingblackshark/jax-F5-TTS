@@ -1,5 +1,5 @@
-_import_structure = {"pipeline_jflux": "JfluxPipeline"}
+_import_structure = {"pipeline_jf5": "Jf5Pipeline"}
 
 from .f5_pipeline import (
-    FluxPipeline,
+    F5Pipeline,
 )

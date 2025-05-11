@@ -72,7 +72,6 @@ def loop_body(
         decoder_segment_ids=decoder_segment_ids,
         text_embed=text_embed_uncond,
         timestep=t_vec,
-        #drop_audio_cond=True,
     )
     pred = pred + (pred - null_pred) * cfg_strength
     latents = latents + (t_prev - t_curr) * pred
@@ -230,14 +229,10 @@ def run(config):
 
     text_embed_cond = jitted_text_encode({"params":text_encoder_params},
                                     text=text_ids,
-                                    #seq_len=config.max_sequence_length,
-                                    #decoder_segment_ids=decoder_segment_ids,
                                     text_decoder_segment_ids=text_decoder_segment_ids,
                                     rngs=rng)
     text_embed_uncond = jitted_text_encode({"params":text_encoder_params},
                                 text=jnp.zeros_like(text_ids),
-                                #seq_len=config.max_sequence_length,
-                                #decoder_segment_ids=decoder_segment_ids,
                                 text_decoder_segment_ids=text_decoder_segment_ids,
                                 rngs=rng)
     
