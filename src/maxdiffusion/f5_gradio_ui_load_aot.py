@@ -30,16 +30,11 @@ from maxdiffusion.f5_gradio_ui import lens_to_mask
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
 # --- Configuration & Constants ---
-#jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
 #MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
-# === Add Bucket Constants ===
-# BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
-# MAX_CHUNKS = BUCKET_SIZES[-1]
-# ==========================
 
 # --- JAX/Model Setup (Global Scope for Gradio) ---
 # These will be initialized once when the script starts
@@ -59,7 +54,6 @@ global_vocab_size = None
 global_p_run_inference = None
 global_data_sharding = None
 global_max_sequence_length = None # Will be set during setup
-#global_batch_size = None # Will be set during setup
 
 # --- Utility Functions (Mostly unchanged, slight modifications) ---
 def load_compiled(shaped_batch,path,partial_train, state):
@@ -80,7 +74,6 @@ def load_compiled(shaped_batch,path,partial_train, state):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(path)
-  #shaped_batch = input_pipeline_interface.get_shaped_batch(config)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}
@@ -579,8 +572,6 @@ def setup_models_and_state(config):
     global jitted_get_mel
 
 
-
-
     t_start_setup = time.time()
     max_logging.log("Starting one-time setup...")
     global_config = config # Store config globally
@@ -595,43 +586,9 @@ def setup_models_and_state(config):
     global_mesh = Mesh(devices_array, config.mesh_axes)
     mesh = global_mesh # Use local variable for clarity in setup
 
-    if not config.mesh_axes: raise ValueError("config.mesh_axes must be defined (e.g., ['data'])")
-    data_axis_name = config.mesh_axes[0]
-    model_axis_names = config.mesh_axes[1:]
-    max_logging.log(f"Using mesh axes: {config.mesh_axes} (Data axis: '{data_axis_name}')")
-    # Determine batch size based on devices
-    #num_devices = len(jax.devices())
-    #global_batch_size = config.per_device_batch_size * num_devices
-    #max_logging.log(f"Using global batch size: {global_batch_size} ({config.per_device_batch_size} per device)")
-        # --- Define Basic Sharding Specs ---
-    # (Keep existing specs: batch_only, batch_seq, batch_seq_dim, replicated)
-    sharding_spec_batch_only = P(data_axis_name)
-    sharding_spec_batch_seq = P(data_axis_name, None)
-    sharding_spec_batch_seq_dim = P(data_axis_name, None, None)
-    #sharding_spec_replicated = P()
-    # === NEW: Sharding spec for get_mel input/output ===
-    # Input y: (Batch, AudioLength) -> Shard AudioLength along data_axis_name
-    sharding_spec_get_mel_input = P(None, data_axis_name)
-    # Output spec: (Batch, MelSeqLength, NumMels) -> Shard MelSeqLength along data_axis_name
-    sharding_spec_get_mel_output = P(None, data_axis_name, None)
-    # =================================================
-
     # --- JIT Compile get_mel with Sharding ---
     max_logging.log("Loading get_mel with sharding...")
-    # Define the sharding for the input 'y'
-    get_mel_in_shardings = (jax.sharding.NamedSharding(mesh, sharding_spec_get_mel_input),) # Tuple for positional args
-    # Define the sharding for the output spectrogram
-    #get_mel_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_replicated)
-    get_mel_out_shardings = None
 
-    # Create the jitted function with sharding info
-    # Static argnums remain the same as they refer to non-JAX array arguments
-    # jitted_get_mel = jax.jit(
-    #     get_mel,
-    #     static_argnums=(1, 2, 3, 4, 5, 6, 8), # n_mels, n_fft, etc.
-    #     in_shardings=get_mel_in_shardings,
-    #     out_shardings=get_mel_out_shardings
-    # )
     def load_serialized_compiled(save_name):
         with open(save_name, "rb") as f:
             serialized_compiled = pickle.load(f)
@@ -643,10 +600,6 @@ def setup_models_and_state(config):
         _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
         return in_tree_recreated, out_tree_recreated
 
-
-
-    # Warmup/Pre-compile get_mel
-    
     try:
         # Determine dummy audio length based on max sequence length and hop
         hop_length = 256 # Should match the default in get_mel
@@ -657,22 +610,13 @@ def setup_models_and_state(config):
         # Use a minimal batch size for compilation, as batch is not sharded here
         compile_batch_size = 1
         dummy_audio_shape = (compile_batch_size, dummy_audio_len)
-        #dummy_audio = jnp.zeros(dummy_audio_shape, dtype=jnp.float32)
-        #dummy_audio_sharded = jax.device_put(dummy_audio, get_mel_in_shardings[0])
         serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,"get_mel_aot.pickle"))
         shaped_batch = jax.ShapeDtypeStruct(dummy_audio_shape,dtype=jnp.float32)
         shaped_input_args = (shaped_batch,)
         shaped_input_kwargs = {}
         in_tree, out_tree = get_train_input_output_trees(get_mel, shaped_input_args, shaped_input_kwargs)
         jitted_get_mel = deserialize_and_load(serialized_compiled, in_tree, out_tree)
-
-        # max_logging.log(f"Warming up jitted_get_mel with dummy shape {dummy_audio_shape} sharded as {sharding_spec_get_mel_input}...")
-        # _ = jitted_get_mel(dummy_audio_sharded).block_until_ready()
         max_logging.log("get_mel AOT successfully loaded.")
-        # You could inspect the shape and sharding of the output here if needed
-        # test_output = jitted_get_mel(dummy_audio_sharded)
-        # print("get_mel output shape:", test_output.shape)
-        # print("get_mel output sharding:", test_output.sharding)
 
     except Exception as e:
         max_logging.error(f"Failed to pre-compile/warmup jitted_get_mel with sharding: {e}", exc_info=True)
@@ -727,10 +671,6 @@ def setup_models_and_state(config):
     # Infer text_num_embeds from vocab size if possible, or set in config
     global_vocab_char_map, global_vocab_size = get_tokenizer(config.vocab_name_or_path, "custom")
 
-    # Make sure these are in config or have defaults
-    # text_dim = config.get("text_dim", 512)
-    # conv_layers = config.get("text_conv_layers", 4)
-
     global_text_encoder = F5TextEmbedding(
         precompute_max_pos=config.max_sequence_length,
         text_num_embeds=config.text_num_embeds, # Add 1 if using +1 shift in list_str_to_idx (or adjust tokenizer/model)
@@ -743,39 +683,20 @@ def setup_models_and_state(config):
 
     # JIT the text encoder apply function
     # Need dummy inputs
-    
 
     rng_init = jax.random.key(config.seed + 10)
     rngs_init = {'params': rng_init, 'dropout': rng_init}
 
     # Define sharding for text encoder params (usually replicated)
-    #text_encoder_params_sharding = jax.tree_map(lambda x: P(), global_text_encoder_params)
-    #text_encoder_params_sharding = jax.tree_map(lambda x: sharding_spec_replicated, global_text_encoder_params)
     global_text_encoder_params = jax.device_put(global_text_encoder_params, None)
     max_logging.log("Text encoder params replicated on devices.")
 
-    text_encode_in_shardings = (
-        None, # Params (replicated)
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq),      # text (batch sharded)
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq),
-        None       # text_decoder_segment_ids (batch sharded)
-        # RNGs are implicitly handled by JAX, often replicated
-    )
-    # Define output sharding (usually replicated or matches consumer needs)
-    # Assuming output might be replicated or used on host later
-    text_encode_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim)
     def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
         return text_encoder.apply({"params": params},text_ids,text_decoder_segment_ids,rngs=rngs)
     global_jitted_text_encode_funcs = {}
     BUCKET_SIZES = global_config.bucket_sizes
     # Compile it once
     for bucket in BUCKET_SIZES:
-        # global_jitted_text_encode_funcs[bucket] = jax.jit(
-        #     wrap_text_encoder_apply,
-        #     in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
-        #     out_shardings=text_encode_out_shardings,
-        #     static_argnums=() # No static args in apply needed here
-        # )
         dummy_text_ids_shape = (bucket, global_max_sequence_length)
         serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,f"text_encode_aot_{bucket}.pickle"))
         shaped_batch = (jax.ShapeDtypeStruct(dummy_text_ids_shape,dtype=jnp.int32),jax.ShapeDtypeStruct(dummy_text_ids_shape,dtype=jnp.int32))
@@ -783,12 +704,6 @@ def setup_models_and_state(config):
         shaped_input_kwargs = {}
         in_tree, out_tree = get_train_input_output_trees(wrap_text_encoder_apply, shaped_input_args, shaped_input_kwargs)
         global_jitted_text_encode_funcs[bucket] = deserialize_and_load(serialized_compiled, in_tree, out_tree)
-        #dummy_text_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
-        #dummy_text_seg_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.int32)
-        # _ = global_jitted_text_encode_funcs[bucket]({"params": global_text_encoder_params},
-        #                             dummy_text_ids,
-        #                             dummy_text_seg_ids,
-        #                             rngs_init)
 
     max_logging.log("Text Encoder AOT loaded.")
 
@@ -802,45 +717,21 @@ def setup_models_and_state(config):
 
     # JIT the vocoder apply function
     # Need dummy input (output of diffusion model)
-    
-
-    rng_voc_init = jax.random.key(config.seed + 11)
-    rngs_voc_init = {'params': rng_voc_init, 'dropout': rng_voc_init}
-
-    # Shard Vocoder Params (Replicated is usually sufficient)
-    #vocos_params_sharding = jax.tree_map(lambda x: sharding_spec_replicated, global_vocos_params)
     global_vocos_params = jax.device_put(global_vocos_params, None)
     max_logging.log("Vocoder params replicated on devices.")
 
-    vocos_apply_in_shardings = (
-        None, # Params (replicated)
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim), # Input latents (batch sharded)
-        None,# RNGs implicitly handled
-    )
-
-    # Output is (Batch, AudioLen), so shard batch dim
-    vocos_apply_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq) # Assuming AudioLen is like Seq dim
     def wrap_vocos_apply(params,x,rngs):
         return vocos_model.apply({"params": params},x,rngs=rngs)
     global_jitted_vocos_apply_funcs = {}
     # Compile it once
     for bucket in BUCKET_SIZES:
-        # global_jitted_vocos_apply_funcs[bucket] = jax.jit(
-        #     wrap_text_encoder_apply,
-        #     in_shardings=vocos_apply_in_shardings,
-        #     out_shardings=vocos_apply_out_shardings,
-        #     static_argnums=()
-        # )
         dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
-        #dummy_latents_vocoder = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
         serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,f"vocos_apply_aot_{bucket}.pickle"))
         shaped_batch = (jax.ShapeDtypeStruct(dummy_latents_shape,dtype=jnp.int32),)
         shaped_input_args = (global_vocos_params,*shaped_batch,rngs_init)
         shaped_input_kwargs = {}
         in_tree, out_tree = get_train_input_output_trees(wrap_vocos_apply, shaped_input_args, shaped_input_kwargs)
         global_jitted_vocos_apply_funcs[bucket] = deserialize_and_load(serialized_compiled, in_tree, out_tree)
-
-        #_ = global_jitted_vocos_apply_funcs[bucket]({"params": global_vocos_params}, dummy_latents_vocoder, rngs_voc_init)
     max_logging.log("Vocoder AOT loaded.")
 
 
@@ -852,18 +743,6 @@ def setup_models_and_state(config):
     # Match sharding used inside generate_audio
     global_data_sharding = jax.sharding.NamedSharding(mesh, P(config.data_sharding[0])) # Assuming first axis is batch for data
 
-
-    # Define shardings for inputs to run_inference
-    # state sharding already defined: global_transformer_state_shardings
-    latents_sharding = global_data_sharding
-    cond_sharding = global_data_sharding
-    decoder_segment_ids_sharding = global_data_sharding
-    text_embed_sharding = global_data_sharding # Or P() if replicated output from text_encoder
-
-    # Timesteps are usually replicated
-    ts_sharding = None #jax.sharding.NamedSharding(mesh, P())
-
-
     # JIT the run_inference function
     # Use functools.partial to fix static arguments like model def, config, mesh
     partial_run_inference = functools.partial(
@@ -874,41 +753,14 @@ def setup_models_and_state(config):
         # Other args (latents, cond, etc.) will be provided at call time
     )
 
-    # Define input shardings for the *dynamic* arguments of run_inference
-    in_shardings_inf = (
-        global_transformer_state_shardings, # states
-        latents_sharding,                # latents
-        cond_sharding,                   # cond
-        decoder_segment_ids_sharding,    # decoder_segment_ids
-        text_embed_sharding,             # text_embed_cond
-        text_embed_sharding,             # text_embed_uncond
-        ts_sharding,                     # c_ts
-        ts_sharding                      # p_ts
-    )
-    # Output sharding (final latents) - should match data sharding probably
-    out_shardings_inf = latents_sharding
-
-
-
     # Optional: Compile run_inference once (can take time)
     global_p_run_inference_funcs = {}
     try:
         for bucket in BUCKET_SIZES:
-            # global_p_run_inference_funcs[bucket] = jax.jit(
-            #     partial_run_inference,
-            #     static_argnums=(), # No static args in the partial itself anymore
-            #     in_shardings=in_shardings_inf,
-            #     out_shardings=out_shardings_inf,
-            # )
             dummy_latents_shape = (bucket, global_max_sequence_length, config.n_mels)
             dummy_text_embed_shape = (bucket, global_max_sequence_length, 512)
             dummy_text_ids_shape = (bucket, global_max_sequence_length)
-            # dummy_latents = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-            # dummy_cond = jnp.zeros(dummy_latents_shape, dtype=jnp.float32)
-            # dummy_decoder_segment_ids = jnp.zeros(dummy_text_ids_shape, dtype=jnp.float32)
-            # dummy_text_embed = jnp.zeros(dummy_text_embed_shape, dtype=jnp.float32)
             dummy_c_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[:-1]
-            #dummy_p_ts = jnp.linspace(0.0, 1.0, config.num_inference_steps + 1)[1:]
 
             serialized_compiled = load_serialized_compiled(os.path.join(global_config.compiled_path,f"run_inference_aot_{bucket}.pickle"))
             shaped_batch = (
@@ -924,17 +776,6 @@ def setup_models_and_state(config):
             shaped_input_kwargs = {}
             in_tree, out_tree = get_train_input_output_trees(partial_run_inference, shaped_input_args, shaped_input_kwargs)
             global_p_run_inference_funcs[bucket] = deserialize_and_load(serialized_compiled, in_tree, out_tree)
-
-            # _ = global_p_run_inference_funcs[bucket](
-            #     global_transformer_state,
-            #     dummy_latents,
-            #     dummy_cond,
-            #     dummy_decoder_segment_ids,
-            #     dummy_text_embed,
-            #     dummy_text_embed,
-            #     dummy_c_ts,
-            #     dummy_p_ts
-            # )
 
         max_logging.log("Inference loop AOT loaded.")
     except Exception as e:
@@ -987,41 +828,6 @@ def main(argv: Sequence[str]) -> None:
                 audio_output = gr.Audio(label="Generated Audio", type="numpy")
 
 
-        # # --- Examples (Updated) ---
-        # gr.Examples(
-        #     examples=[
-        #         [
-        #             "And maybe read maybe read that book you brought?",
-        #             "test.mp3", # Replace path
-        #             "This is a test of the emergency broadcast system.",
-        #             50, 2.0, 1.0, False # Sway disabled
-        #         ],
-        #         [
-        #             "I strongly believe that love is one of the only things we have in this world.",
-        #             "test.mp3", # Replace path
-        #             "你好，世界！这是一个测试。",
-        #             50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
-        #         ],
-        #          [
-        #             DEFAULT_REF_TEXT,
-        #             "test.mp3", # Replace path
-        #             "The quick brown fox jumps over the lazy dog.",
-        #             60, 3.0, 0.8, False # Sway disabled
-        #         ],
-        #          [
-        #             DEFAULT_REF_TEXT,
-        #             "test.mp3", # Replace path
-        #             "Sway sampling can sometimes alter the generation dynamics.",
-        #             50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
-        #         ],
-        #     ],
-        #     # Update inputs list order
-        #     inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-        #     outputs=[audio_output],
-        #     fn=generate_audio,
-        #     cache_examples=False,
-        # )
-
         # Update button click inputs list order
         submit_btn.click(
             fn=generate_audio,
@@ -1035,28 +841,4 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
-  # Make sure to configure paths and other settings in your pyconfig file (e.g., config.yaml)
-  # Example required config fields:
-  # seed: 0
-  # mesh_axes: ['data'] # Or ['data', 'fsdp'] etc.
-  # per_device_batch_size: 1
-  # max_sequence_length: 4096 # Adjust based on model/memory
-  # latent_dim: 100 # Or actual latent dim of your model
-  # embed_dim: 512 # Or actual embed dim
-  # num_layers: 12
-  # num_heads: 8
-  # mlp_ratio: 2
-  # n_mels: 100 # Mel bins expected by model/vocoder
-  # attention: 'local' # Or 'flash', 'dot_product'
-  # activations_dtype: 'bfloat16'
-  # weights_dtype: 'bfloat16'
-  # pretrained_model_name_or_path: '/path/to/your/f5_weights.safetensors'
-  # use_ema: False # Or True
-  # vocab_name_or_path: '/path/to/your/vocab.txt'
-  # vocoder_model_path: '/path/to/your/vocos_model' # Path for jax-vocos load_model
-  # data_sharding: ['data'] # Sharding axis name for batch dim
-  # logical_axis_rules: [['batch', 'data']] # Example rule
-  # gradio_share: False # Set to True to create public link (use with caution)
-  #jax.config.update("jax_explain_cache_misses", True)
-  #jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
   app.run(main)
