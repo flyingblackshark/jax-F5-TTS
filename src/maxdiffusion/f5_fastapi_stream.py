@@ -36,7 +36,7 @@ from pydantic import BaseModel
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 import json
-
+import soundfile as sf
 # --- Configuration & Constants ---
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0
