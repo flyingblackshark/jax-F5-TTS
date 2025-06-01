@@ -41,6 +41,7 @@ from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
 import librosa
 import jax.experimental.compilation_cache
+from maxdiffusion.utils.seq_utils import lens_to_mask
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2
 def loop_body(
@@ -149,7 +150,6 @@ def run(config):
     if len(ref_text[-1].encode("utf-8")) == 1:
         ref_text = ref_text + " "
     gen_text = "Hello,I'm Aurora.And nice to meet you.This is a very long sentence intended to test the stability of the model.I really like this model and so I use it a lot."
-    #gen_text = "The impact of technology on modern society is profound, influencing nearly every aspect of daily life, from communication to healthcare, education, and business. The rapid advancements in artificial intelligence, automation, and digital connectivity have transformed the way people interact, work, and access information. Social media platforms have redefined communication, enabling instant global connections but also raising concerns about privacy, mental health, and misinformation. In the workplace, automation and AI-driven tools have increased efficiency and productivity while simultaneously reshaping job markets, requiring individuals to continuously adapt and acquire new skills. In education, online learning platforms and digital resources have made knowledge more accessible, bridging gaps in traditional education systems but also highlighting issues of digital divide and screen dependency. Healthcare has seen groundbreaking innovations such as telemedicine, wearable health monitors, and AI-assisted diagnostics, improving patient care but also posing ethical and regulatory challenges. Despite these advancements, concerns about cybersecurity, data privacy, and the ethical implications of AI remain pressing issues. As technology continues to evolve, balancing innovation with ethical considerations and ensuring equitable access to its benefits will be crucial for a sustainable and inclusive future. Ultimately, while technology offers immense potential to improve lives, its responsible and mindful use is essential to mitigating its challenges."
     ref_audio, ref_sr = librosa.load("/root/MaxTTS-Diffusion/test.mp3",sr=24000)
     max_chars = int(len(ref_text.encode("utf-8")) / (ref_audio.shape[-1] / ref_sr) * (22 - ref_audio.shape[-1] / ref_sr))
     vocab_char_map, vocab_size = get_tokenizer(config.vocab_name_or_path, "custom")
@@ -179,20 +179,6 @@ def run(config):
     
 
     rng = {'params': jax.random.PRNGKey(0), 'dropout': jax.random.PRNGKey(0)}
-
-    def lens_to_mask(t: jnp.ndarray, length: int | None = None) -> jnp.ndarray:
-        if length is None:
-            length = jnp.max(t)  # 使用t的最大值作为默认长度
-        
-        # 创建从0到length-1的序列
-        seq = jnp.arange(length)
-        
-        # 广播比较：每个元素t[i]与序列的每个位置比较
-        mask = seq < t[:, None]  # 形状: (b, n)
-        
-        return mask
-    
-
     lens = jnp.full((batch_size,), ref_audio_len)
     duration = jnp.asarray(batched_duration)
     duration = jnp.pad(duration,(0,padded_batch_size))

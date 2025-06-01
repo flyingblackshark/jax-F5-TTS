@@ -27,6 +27,7 @@ import jax.experimental.compilation_cache
 from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
+from maxdiffusion.utils.seq_utils import lens_to_mask
 # --- Configuration & Constants ---
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
@@ -58,17 +59,6 @@ global_p_run_inference = None
 global_data_sharding = None
 global_max_sequence_length = None # Will be set during setup
 #global_batch_size = None # Will be set during setup
-
-def lens_to_mask(t: np.ndarray, length: int) -> np.ndarray:
-    # t: array of lengths, shape (b,)
-    # length: maximum sequence length
-    # returns: mask of shape (b, length)
-    if t.ndim == 0: # Handle single length input
-        t = t.reshape(1)
-    seq = np.arange(length)
-    mask = seq < t[:, None]  # Shape: (b, length)
-    return mask
-
 # --- Core Diffusion Loop Logic (Unchanged) ---
 
 def loop_body(
@@ -532,9 +522,6 @@ def setup_models_and_state(config):
     global global_jitted_vocos_apply_func, global_vocab_char_map, global_vocab_size
     global global_p_run_inference_func, global_data_sharding, global_max_sequence_length
     global jitted_get_mel
-
-
-
 
     t_start_setup = time.time()
     max_logging.log("Starting one-time setup...")

@@ -24,9 +24,9 @@ import librosa
 from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
 import pickle
 from jax.experimental.serialize_executable import deserialize_and_load
-from maxdiffusion.f5_gradio_ui import lens_to_mask
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
+from maxdiffusion.utils.seq_utils import lens_to_mask
 # --- Configuration & Constants ---
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000

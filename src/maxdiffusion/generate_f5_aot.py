@@ -23,6 +23,7 @@ from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
 from jax.experimental.serialize_executable import serialize
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer
+from maxdiffusion.utils.seq_utils import lens_to_mask
 # --- Configuration & Constants ---
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
@@ -55,19 +56,7 @@ def save_compiled(compiled, save_name):
   serialized, _, _ = serialize(compiled)
   with open(save_name, "wb") as f:
     pickle.dump(serialized, f)
-    
-
-def lens_to_mask(t: jnp.ndarray, length: int) -> jnp.ndarray:
-    # t: array of lengths, shape (b,)
-    # length: maximum sequence length
-    # returns: mask of shape (b, length)
-    if t.ndim == 0: # Handle single length input
-        t = t.reshape(1)
-    seq = jnp.arange(length)
-    mask = seq < t[:, None]  # Shape: (b, length)
-    return mask
-
-
+    s
 # --- Core Diffusion Loop Logic (Unchanged) ---
 
 def loop_body(
