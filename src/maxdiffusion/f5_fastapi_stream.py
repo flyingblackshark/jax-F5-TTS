@@ -43,7 +43,6 @@ cfg_strength = 2.0
 TARGET_SR = 24000
 MAX_DURATION_SECS = 40
 MAX_INFERENCE_STEPS = 100
-DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 
 # --- Global Variables for Model State ---
 global_config = None
@@ -171,7 +170,7 @@ async def generate_audio_stream(
 
     # --- Input Validation ---
     if not ref_text:
-        ref_text = DEFAULT_REF_TEXT
+        raise ValueError("Reference text cannot be empty.")
     if not gen_text:
         raise ValueError("Generation text cannot be empty.")
     if ref_audio is None or ref_audio.size == 0:
@@ -535,7 +534,6 @@ def setup_models_and_state(config):
         static_argnums=()
     )
 
-    max_logging.log("Text Encoder JIT compiled.")
 
     # Load Vocoder
     max_logging.log("Loading Vocoder model...")
@@ -562,7 +560,6 @@ def setup_models_and_state(config):
         out_shardings=vocos_apply_out_shardings,
         static_argnums=()
     )
-    max_logging.log("Vocoder JIT compiled.")
 
     # Compile Inference Loop
     max_logging.log("Compiling main inference loop...")

@@ -36,4 +36,3 @@ jieba
 pypinyin
 librosa
 jax_vocos
-gradio
