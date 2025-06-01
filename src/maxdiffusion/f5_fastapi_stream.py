@@ -654,7 +654,8 @@ async def startup_event():
     """Initialize models on startup."""
     try:
         # Initialize pyconfig with default arguments
-        pyconfig.initialize([])
+        argv = ["/tmp/gcsfuse/f5/f5_docker.yml"]
+        pyconfig.initialize(argv)
         config = pyconfig.config
         
         # Override config for single TPU v6e-1
