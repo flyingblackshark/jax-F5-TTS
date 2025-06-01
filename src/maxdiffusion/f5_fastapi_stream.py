@@ -669,8 +669,41 @@ async def generate_audio_endpoint(request: AudioGenerationRequest):
     """Generate audio with streaming response."""
     try:
         # Decode base64 audio
-        ref_audio_bytes = base64.b64decode(request.ref_audio_base64)
-        ref_audio = np.frombuffer(ref_audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+        # 1. Decode base64 to get the raw file bytes
+        ref_audio_file_bytes = base64.b64decode(request.ref_audio_base64)
+
+        # 2. Read the audio data from the in-memory file bytes
+        #    Wrap the bytes in an io.BytesIO object to make it file-like
+        audio_stream = io.BytesIO(ref_audio_file_bytes)
+        
+        #    Use soundfile to read the audio data.
+        #    It will attempt to determine the format (e.g., WAV, FLAC) from the bytes.
+        #    dtype='float32' ensures samples are float32.
+        #    soundfile also normalizes integer PCM (like int16) to the range [-1.0, 1.0].
+        try:
+            data, samplerate = sf.read(audio_stream, dtype='float32')
+        except sf.LibsndfileError as e:
+            # This error means the bytes couldn't be parsed as a known audio file format.
+            # For FastAPI, you might raise an HTTPException here.
+            # raise HTTPException(status_code=400, detail=f"Could not parse audio file data: {e}")
+            return {"error": f"Could not parse audio file data: {e}"}, 400 # Example error response
+
+        ref_audio = data # 'data' is now a NumPy array of float32 audio samples
+
+        # 3. Handle multi-channel audio (if necessary)
+        #    The original code implicitly assumed mono or didn't specify.
+        #    If 'data' can be multi-channel (e.g., stereo), you might want to convert to mono.
+        if ref_audio.ndim > 1:
+            if ref_audio.shape[1] == 0: # Check for empty audio data after read
+                 # raise HTTPException(status_code=400, detail="Audio data is empty or has no channels.")
+                 return {"error": "Audio data is empty or has no channels."}, 400
+
+            # Example: Convert to mono by averaging channels if more than one channel exists
+            if ref_audio.shape[1] > 1:
+                ref_audio = np.mean(ref_audio, axis=1)
+            else: # If it's (samples, 1), squeeze to 1D
+                ref_audio = ref_audio.squeeze()
+
         
         async def stream_generator():
             try:

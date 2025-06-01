@@ -184,3 +184,6 @@ jax_cache
 
 f5_gradio_ui_multi_host.py
 src/maxdiffusion/configs/f5_dev.yml
+src/maxdiffusion/tests/stream_audio_assembler.py
+.gitignore
+src/maxdiffusion/tests/test_stream.py
