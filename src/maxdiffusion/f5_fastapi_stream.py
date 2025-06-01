@@ -657,11 +657,7 @@ async def startup_event():
         args = getattr(app.state, 'command_line_args', [])
         pyconfig.initialize(args)
         config = pyconfig.config
-        
-        # Override config for single TPU v6e-1
-        config.per_device_batch_size = 1
-        config.mesh_axes = ['data']
-        
+             
         setup_models_and_state(config)
         max_logging.log("FastAPI server startup completed successfully.")
     except Exception as e:
