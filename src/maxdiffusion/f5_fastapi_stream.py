@@ -654,8 +654,8 @@ async def startup_event():
     """Initialize models on startup."""
     try:
         # Initialize pyconfig with default arguments
-        argv = ["/tmp/gcsfuse/f5/f5_docker.yml"]
-        pyconfig.initialize(argv)
+        args = getattr(app.state, 'command_line_args', [])
+        pyconfig.initialize(args)
         config = pyconfig.config
         
         # Override config for single TPU v6e-1
@@ -726,6 +726,7 @@ async def get_config():
 
 def main(argv: Sequence[str]) -> None:
     """Main function to start the FastAPI server."""
+    app.state.command_line_args = argv
     max_logging.log("Starting F5-TTS FastAPI Streaming Server...")
     
     # Run the server
