@@ -43,7 +43,7 @@ cfg_strength = 2.0
 TARGET_SR = 24000
 MAX_DURATION_SECS = 40
 MAX_INFERENCE_STEPS = 100
-
+SEQUENCE_LENGTH_BUCKET = [512, 1024, 2048, 4096]
 # --- Global Variables for Model State ---
 global_config = None
 global_mesh = None
@@ -72,7 +72,6 @@ class AudioGenerationRequest(BaseModel):
     guidance_scale: float = 2.0
     speed_factor: float = 1.0
     use_sway_sampling: bool = False
-    sequence_length: int = 1024  # 512, 1024, 2048, 4096
     chunk_size: int = 1024  # Audio chunk size for streaming
 
 class StreamChunk(BaseModel):
@@ -145,6 +144,56 @@ def run_inference(
     return latents_final
 
 # --- Streaming Audio Generation Function ---
+# 在SEQUENCE_LENGTH_BUCKET定义后添加估算函数
+def estimate_sequence_length(ref_text: str, gen_text: str, ref_audio: np.ndarray, speed_factor: float = 1.0) -> int:
+    """
+    根据ref_text、gen_text和ref_audio估算合适的序列长度，从SEQUENCE_LENGTH_BUCKET中选择。
+    
+    Args:
+        ref_text: 参考文本
+        gen_text: 生成文本
+        ref_audio: 参考音频数组
+        speed_factor: 语速因子
+    
+    Returns:
+        从SEQUENCE_LENGTH_BUCKET中选择的序列长度
+    """
+    hop_length = 256  # 与get_mel保持一致
+    
+    # 计算参考音频的帧数
+    ref_audio_len_frames = ref_audio.shape[-1] // hop_length + 1
+    
+    # 计算参考文本的字节长度
+    ref_text_byte_len = len(ref_text.encode('utf-8'))
+    gen_text_byte_len = len(gen_text.encode('utf-8'))
+    
+    # 估算生成音频的帧数
+    if ref_text_byte_len > 0:
+        # 基于参考文本和音频的比例估算
+        estimated_gen_frames = int(ref_audio_len_frames / ref_text_byte_len * gen_text_byte_len / speed_factor)
+    else:
+        # 如果参考文本为空，使用默认的字符/秒比率
+        avg_chars_per_sec = 5 * speed_factor
+        estimated_gen_frames = int(gen_text_byte_len * (TARGET_SR / hop_length) / avg_chars_per_sec) if avg_chars_per_sec > 0 else 50
+    
+    # 总的估算帧数
+    total_estimated_frames = ref_audio_len_frames + estimated_gen_frames
+    
+    # 添加安全边距（20%）
+    total_estimated_frames = int(total_estimated_frames * 1.2)
+    
+    # 从SEQUENCE_LENGTH_BUCKET中选择合适的长度
+    for length in SEQUENCE_LENGTH_BUCKET:
+        if total_estimated_frames <= length:
+            max_logging.log(f"估算序列长度: {total_estimated_frames} 帧，选择bucket: {length}")
+            return length
+    
+    # 如果超过最大长度，返回最大值
+    max_length = SEQUENCE_LENGTH_BUCKET[-1]
+    max_logging.log(f"估算序列长度: {total_estimated_frames} 帧超过最大值，使用最大bucket: {max_length}")
+    return max_length
+
+# 修改generate_audio_stream函数
 async def generate_audio_stream(
     ref_text: str,
     gen_text: str,
@@ -153,7 +202,6 @@ async def generate_audio_stream(
     guidance_scale: float = 2.0,
     speed_factor: float = 1.0,
     use_sway_sampling: bool = False,
-    sequence_length: int = 1024,
     chunk_size: int = 1024
 ) -> AsyncGenerator[StreamChunk, None]:
     """
@@ -162,11 +210,11 @@ async def generate_audio_stream(
     global cfg_strength
     cfg_strength = guidance_scale
     
-    # Override global max sequence length for this request
-    current_max_length = sequence_length
+    # 估算当前请求需要的序列长度
+    current_max_length = estimate_sequence_length(ref_text, gen_text, ref_audio, speed_factor)
     
     t_start_total = time.time()
-    max_logging.log(f"Starting streaming audio generation... Steps: {num_inference_steps}, CFG: {guidance_scale}, Speed: {speed_factor}, Seq Length: {sequence_length}")
+    max_logging.log(f"Starting streaming audio generation... Steps: {num_inference_steps}, CFG: {guidance_scale}, Speed: {speed_factor}, Estimated seq length: {current_max_length}")
 
     # --- Input Validation ---
     if not ref_text:
@@ -403,7 +451,7 @@ def setup_models_and_state(config):
     global global_transformer_state_shardings, global_text_encoder, global_text_encoder_params
     global global_jitted_text_encode_func, global_vocos_model, global_vocos_params
     global global_jitted_vocos_apply_func, global_vocab_char_map, global_vocab_size
-    global global_p_run_inference_func, global_data_sharding, global_max_sequence_length
+    global global_p_run_inference_func, global_data_sharding
     global jitted_get_mel
 
     t_start_setup = time.time()
@@ -411,8 +459,7 @@ def setup_models_and_state(config):
     global_config = config
 
     flash_block_sizes = get_flash_block_sizes(config)
-    global_max_sequence_length = config.max_sequence_length
-    max_logging.log(f"Model configured for max sequence length: {global_max_sequence_length}")
+
 
     rng = jax.random.key(config.seed)
     devices_array = create_device_mesh(config)
@@ -442,22 +489,6 @@ def setup_models_and_state(config):
         in_shardings=get_mel_in_shardings,
         out_shardings=get_mel_out_shardings
     )
-
-    # Warmup get_mel
-    try:
-        hop_length = 256
-        dummy_audio_len = global_max_sequence_length * hop_length + hop_length
-        compile_batch_size = 1
-        dummy_audio_shape = (compile_batch_size, dummy_audio_len)
-        dummy_audio = jnp.zeros(dummy_audio_shape, dtype=jnp.float32)
-        dummy_audio_sharded = jax.device_put(dummy_audio, get_mel_in_shardings[0])
-        
-        max_logging.log(f"Warming up jitted_get_mel with dummy shape {dummy_audio_shape}...")
-        _ = jitted_get_mel(dummy_audio_sharded).block_until_ready()
-        max_logging.log("jitted_get_mel successfully compiled and warmed up.")
-    except Exception as e:
-        max_logging.error(f"Failed to pre-compile/warmup jitted_get_mel: {e}", exc_info=True)
-        raise
 
     # Load Transformer
     max_logging.log("Loading F5 Transformer model...")
@@ -644,11 +675,6 @@ async def generate_audio_endpoint(request: AudioGenerationRequest):
         ref_audio_bytes = base64.b64decode(request.ref_audio_base64)
         ref_audio = np.frombuffer(ref_audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
         
-        # Validate sequence length
-        valid_lengths = [512, 1024, 2048, 4096]
-        if request.sequence_length not in valid_lengths:
-            raise HTTPException(status_code=400, f"Invalid sequence_length. Must be one of {valid_lengths}")
-        
         async def stream_generator():
             try:
                 async for chunk in generate_audio_stream(
@@ -659,7 +685,6 @@ async def generate_audio_endpoint(request: AudioGenerationRequest):
                     guidance_scale=request.guidance_scale,
                     speed_factor=request.speed_factor,
                     use_sway_sampling=request.use_sway_sampling,
-                    sequence_length=request.sequence_length,
                     chunk_size=request.chunk_size
                 ):
                     yield f"data: {chunk.json()}\n\n"
@@ -693,8 +718,7 @@ async def health_check():
 async def get_config():
     """Get current configuration."""
     return {
-        "max_sequence_length": global_max_sequence_length,
-        "supported_sequence_lengths": [512, 1024, 2048, 4096],
+        "sequence_lengths_bucket": SEQUENCE_LENGTH_BUCKET,
         "target_sample_rate": TARGET_SR,
         "max_duration_seconds": MAX_DURATION_SECS
     }
