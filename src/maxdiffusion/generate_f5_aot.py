@@ -56,7 +56,6 @@ def save_compiled(compiled, save_name):
   serialized, _, _ = serialize(compiled)
   with open(save_name, "wb") as f:
     pickle.dump(serialized, f)
-    s
 # --- Core Diffusion Loop Logic (Unchanged) ---
 
 def loop_body(
