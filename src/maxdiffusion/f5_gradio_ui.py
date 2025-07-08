@@ -3,8 +3,6 @@ from typing import Callable, List, Union, Sequence, Tuple
 from absl import app
 from contextlib import ExitStack
 import functools
-import jax.experimental
-import jax.experimental.compilation_cache.compilation_cache
 import numpy as np
 import jax
 from jax.sharding import Mesh, PartitionSpec as P
@@ -23,21 +21,19 @@ from maxdiffusion.max_utils import (
 import time
 from maxdiffusion.models.modeling_flax_pytorch_utils import convert_f5_state_dict_to_flax
 import librosa
-import jax.experimental.compilation_cache
 from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
 from maxdiffusion.utils.seq_utils import lens_to_mask
 # --- Configuration & Constants ---
-jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
-MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
+#MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
-#BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
-#MAX_CHUNKS = BUCKET_SIZES[-1]
+BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
+MAX_CHUNKS = BUCKET_SIZES[-1]
 # ==========================
 
 # --- JAX/Model Setup (Global Scope for Gradio) ---
@@ -198,9 +194,9 @@ def generate_audio(
     # Add a buffer (e.g., 20%) to handle faster speech or estimation errors
     chars_per_sec_ref = len(ref_text.encode("utf-8")) / ref_duration_sec
     # Estimate max duration for generated chunks based on available sequence length
-    max_gen_duration_sec = MAX_DURATION_SECS - ref_duration_sec
+    max_gen_duration_sec = global_max_sequence_length * 256 / TARGET_SR - ref_duration_sec
     if max_gen_duration_sec <= 0:
-        raise gr.Error(f"Reference audio duration ({ref_duration_sec:.1f}s) exceeds max allowed duration ({MAX_DURATION_SECS}s).")
+        raise gr.Error(f"Reference audio duration ({ref_duration_sec:.1f}s) exceeds max allowed duration ({global_max_sequence_length * 256 / TARGET_SR}s).")
 
     # Estimate max characters per chunk, ensuring it's positive
     # Use a slightly higher estimate chars_per_sec to be conservative
@@ -264,9 +260,6 @@ def generate_audio(
     if ref_audio_len_frames >= global_max_sequence_length:
          raise gr.Error(f"Reference audio ({ref_audio_len_frames} frames) already exceeds max sequence length ({global_max_sequence_length}). Please use shorter audio.")
 
-
-
-     # === MODIFIED Duration Estimation Loop ===
     for i, single_gen_text in enumerate(gen_text_batches):
         text_combined = ref_text + single_gen_text
         batched_text_list_combined.append(text_combined)
@@ -301,16 +294,8 @@ def generate_audio(
     final_text_list_pinyin = convert_char_to_pinyin(batched_text_list_combined)
     max_logging.log(f"Pinyin conversion took {time.time() - pinyin_start_time:.2f}s")
 
-
-    # === Apply Padding to text_ids ===
-    # Tokenize the *actual* chunks first
     text_ids_unpadded = list_str_to_idx(final_text_list_pinyin, global_vocab_char_map, max_length=global_max_sequence_length)
-    # Now pad to the target_batch_size
     text_ids = np.pad(text_ids_unpadded, ((0, padded_items_count), (0, 0)), constant_values=0)
-    # ================================
-
-    # (Condition preparation - uses total_batch_items)
-    # ... ref_audio_padded, cond calculation ...
     ref_audio_padded = np.pad(ref_audio, (0, max(0, global_max_sequence_length * hop_length + hop_length - ref_audio.shape[0])))
     ref_audio_padded = ref_audio_padded[np.newaxis, :]
     cond = jitted_get_mel(ref_audio_padded)
@@ -574,32 +559,6 @@ def setup_models_and_state(config):
         in_shardings=get_mel_in_shardings,
         out_shardings=get_mel_out_shardings
     )
-        # Warmup/Pre-compile get_mel
-    try:
-        # Determine dummy audio length based on max sequence length and hop
-        hop_length = 256 # Should match the default in get_mel
-        # Use a length that aligns reasonably with max_sequence_length for the mel output
-        # This ensures the sharded dimension is meaningful during compilation.
-        # Add some buffer just in case.
-        dummy_audio_len = global_max_sequence_length * hop_length + hop_length
-        # Use a minimal batch size for compilation, as batch is not sharded here
-        compile_batch_size = 1
-        dummy_audio_shape = (compile_batch_size, dummy_audio_len)
-        dummy_audio = jnp.zeros(dummy_audio_shape, dtype=jnp.float32)
-        dummy_audio_sharded = jax.device_put(dummy_audio, get_mel_in_shardings[0])
-
-        max_logging.log(f"Warming up jitted_get_mel with dummy shape {dummy_audio_shape} sharded as {sharding_spec_get_mel_input}...")
-        _ = jitted_get_mel(dummy_audio_sharded).block_until_ready()
-        max_logging.log("jitted_get_mel successfully compiled and warmed up.")
-        # You could inspect the shape and sharding of the output here if needed
-        # test_output = jitted_get_mel(dummy_audio_sharded)
-        # print("get_mel output shape:", test_output.shape)
-        # print("get_mel output sharding:", test_output.sharding)
-
-    except Exception as e:
-        max_logging.error(f"Failed to pre-compile/warmup jitted_get_mel with sharding: {e}", exc_info=True)
-        # Decide if this is fatal or if the app can continue with non-sharded/later JIT
-        raise # Re-raise to make it fatal during setup
 
     # --- Load Transformer ---
     max_logging.log("Loading F5 Transformer model...")
@@ -657,34 +616,21 @@ def setup_models_and_state(config):
     )
     text_encoder = global_text_encoder # Local var
 
-    # JIT the text encoder apply function
-    # Need dummy inputs
-    
-
-    rng_init = jax.random.key(config.seed + 10)
-    rngs_init = {'params': rng_init, 'dropout': rng_init}
-
-    # Define sharding for text encoder params (usually replicated)
-    #text_encoder_params_sharding = jax.tree_map(lambda x: P(), global_text_encoder_params)
-    #text_encoder_params_sharding = jax.tree_map(lambda x: sharding_spec_replicated, global_text_encoder_params)
-    global_text_encoder_params = jax.device_put(global_text_encoder_params, None)
+    global_text_encoder_params = jax.device_put(global_text_encoder_params, P())
     max_logging.log("Text encoder params replicated on devices.")
 
     text_encode_in_shardings = (
-        None, # Params (replicated)
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq),      # text (batch sharded)
+        P(), # Params (replicated)
+        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq), 
         jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq),
-        None       # text_decoder_segment_ids (batch sharded)
-        # RNGs are implicitly handled by JAX, often replicated
+        P()       
     )
     # Define output sharding (usually replicated or matches consumer needs)
     # Assuming output might be replicated or used on host later
     text_encode_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim)
     def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
         return text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
-
-
-    # Compile it once
+        
     global_jitted_text_encode_func = jax.jit(
         wrap_text_encoder_apply,
         in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
@@ -752,7 +698,7 @@ def setup_models_and_state(config):
     text_embed_sharding = global_data_sharding # Or P() if replicated output from text_encoder
 
     # Timesteps are usually replicated
-    ts_sharding = None #jax.sharding.NamedSharding(mesh, P())
+    ts_sharding = jax.sharding.NamedSharding(mesh, P())
 
 
     # JIT the run_inference function
@@ -837,42 +783,6 @@ def main(argv: Sequence[str]) -> None:
             with gr.Column(scale=1): # Make right column narrower
                 audio_output = gr.Audio(label="Generated Audio", type="numpy")
 
-
-        # --- Examples (Updated) ---
-        # gr.Examples(
-        #     examples=[
-        #         [
-        #             "And maybe read maybe read that book you brought?",
-        #             "test.mp3", # Replace path
-        #             "This is a test of the emergency broadcast system.",
-        #             50, 2.0, 1.0, False # Sway disabled
-        #         ],
-        #         [
-        #             "I strongly believe that love is one of the only things we have in this world.",
-        #             "test.mp3", # Replace path
-        #             "你好，世界！这是一个测试。",
-        #             50, 2.5, 1.2, True # Sway enabled (if coef>0 in config)
-        #         ],
-        #          [
-        #             DEFAULT_REF_TEXT,
-        #             "test.mp3", # Replace path
-        #             "The quick brown fox jumps over the lazy dog.",
-        #             60, 3.0, 0.8, False # Sway disabled
-        #         ],
-        #          [
-        #             DEFAULT_REF_TEXT,
-        #             "test.mp3", # Replace path
-        #             "Sway sampling can sometimes alter the generation dynamics.",
-        #             50, 2.0, 1.0, True # Sway enabled (if coef>0 in config)
-        #         ],
-        #     ],
-        #     # Update inputs list order
-        #     inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
-        #     outputs=[audio_output],
-        #     fn=generate_audio,
-        #     cache_examples=False,
-        # )
-
         # Update button click inputs list order
         submit_btn.click(
             fn=generate_audio,
@@ -886,28 +796,4 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
-  # Make sure to configure paths and other settings in your pyconfig file (e.g., config.yaml)
-  # Example required config fields:
-  # seed: 0
-  # mesh_axes: ['data'] # Or ['data', 'fsdp'] etc.
-  # per_device_batch_size: 1
-  # max_sequence_length: 4096 # Adjust based on model/memory
-  # latent_dim: 100 # Or actual latent dim of your model
-  # embed_dim: 512 # Or actual embed dim
-  # num_layers: 12
-  # num_heads: 8
-  # mlp_ratio: 2
-  # n_mels: 100 # Mel bins expected by model/vocoder
-  # attention: 'local' # Or 'flash', 'dot_product'
-  # activations_dtype: 'bfloat16'
-  # weights_dtype: 'bfloat16'
-  # pretrained_model_name_or_path: '/path/to/your/f5_weights.safetensors'
-  # use_ema: False # Or True
-  # vocab_name_or_path: '/path/to/your/vocab.txt'
-  # vocoder_model_path: '/path/to/your/vocos_model' # Path for jax-vocos load_model
-  # data_sharding: ['data'] # Sharding axis name for batch dim
-  # logical_axis_rules: [['batch', 'data']] # Example rule
-  # gradio_share: False # Set to True to create public link (use with caution)
-  #jax.config.update("jax_explain_cache_misses", True)
-  #jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
   app.run(main)
