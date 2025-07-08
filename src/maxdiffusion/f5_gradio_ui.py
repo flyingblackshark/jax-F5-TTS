@@ -769,12 +769,12 @@ def main(argv: Sequence[str]) -> None:
                 ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
                 gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
                 with gr.Row():
-                    steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=50, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
+                    steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=20, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
                     cfg_slider = gr.Slider(minimum=1.0, maximum=10.0, value=2.0, step=0.1, label="Guidance Scale (CFG)", info="Higher values follow prompts more strictly but can reduce diversity.")
                 with gr.Row():
                     speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
                     # === Add Sway Sampling Switch ===
-                    sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=False, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
+                    sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=True, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
                     # ==============================
                 submit_btn = gr.Button("Generate Audio", variant="primary")
 
