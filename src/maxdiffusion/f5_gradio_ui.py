@@ -603,18 +603,14 @@ def setup_models_and_state(config):
     # Infer text_num_embeds from vocab size if possible, or set in config
     global_vocab_char_map, global_vocab_size = get_tokenizer(config.vocab_name_or_path, "custom")
 
-    # Make sure these are in config or have defaults
-    # text_dim = config.get("text_dim", 512)
-    # conv_layers = config.get("text_conv_layers", 4)
-
     global_text_encoder = F5TextEmbedding(
-        text_num_embeds=2545, # Add 1 if using +1 shift in list_str_to_idx (or adjust tokenizer/model)
-        text_dim=512,
-        conv_layers=4,
+        precompute_max_pos=config.max_sequence_length,
+        text_num_embeds=config.text_num_embeds, # Add 1 if using +1 shift in list_str_to_idx (or adjust tokenizer/model)
+        text_dim=config.text_dim,
+        conv_layers=config.text_conv_layers,
         # Add other necessary params from F5TextEmbedding definition
         dtype=jnp.float32
     )
-    text_encoder = global_text_encoder # Local var
 
     global_text_encoder_params = jax.device_put(global_text_encoder_params, jax.sharding.NamedSharding(mesh, P()))
     max_logging.log("Text encoder params replicated on devices.")
@@ -629,7 +625,7 @@ def setup_models_and_state(config):
     # Assuming output might be replicated or used on host later
     text_encode_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim)
     def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
-        return text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
+        return global_text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
 
     global_jitted_text_encode_func = jax.jit(
         wrap_text_encoder_apply,
