@@ -646,7 +646,6 @@ def setup_models_and_state(config):
     max_logging.log("Loading Vocoder model...")
     # Assumes load_model() returns model definition and params
     global_vocos_model, vocos_params_loaded = load_vocos_model(config.vocoder_model_path) # Add vocoder path to config
-    vocos_model = global_vocos_model # Local var
     global_vocos_params = flax.core.frozen_dict.FrozenDict(vocos_params_loaded) # Store globally
 
     # JIT the vocoder apply function
@@ -657,20 +656,19 @@ def setup_models_and_state(config):
     rngs_voc_init = {'params': rng_voc_init, 'dropout': rng_voc_init}
 
     # Shard Vocoder Params (Replicated is usually sufficient)
-    #vocos_params_sharding = jax.tree_map(lambda x: sharding_spec_replicated, global_vocos_params)
-    global_vocos_params = jax.device_put(global_vocos_params, None)
+    global_vocos_params = jax.device_put(global_vocos_params, jax.sharding.NamedSharding(mesh, P()))
     max_logging.log("Vocoder params replicated on devices.")
 
     vocos_apply_in_shardings = (
-        None, # Params (replicated)
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim), # Input latents (batch sharded)
-        None,# RNGs implicitly handled
+        jax.sharding.NamedSharding(mesh, P()),
+        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim),
+        jax.sharding.NamedSharding(mesh, P()),
     )
 
     # Output is (Batch, AudioLen), so shard batch dim
     vocos_apply_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq) # Assuming AudioLen is like Seq dim
     def wrap_vocos_apply(params,x,rngs):
-        return vocos_model.apply(params,x,rngs=rngs)
+        return global_vocos_model.apply(params,x,rngs=rngs)
 
     global_jitted_vocos_apply_func = jax.jit(
         wrap_vocos_apply,
