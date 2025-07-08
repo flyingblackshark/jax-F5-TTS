@@ -616,21 +616,21 @@ def setup_models_and_state(config):
     )
     text_encoder = global_text_encoder # Local var
 
-    global_text_encoder_params = jax.device_put(global_text_encoder_params, P())
+    global_text_encoder_params = jax.device_put(global_text_encoder_params, jax.sharding.NamedSharding(mesh, P()))
     max_logging.log("Text encoder params replicated on devices.")
 
     text_encode_in_shardings = (
-        P(), # Params (replicated)
+        jax.sharding.NamedSharding(mesh, P()), # Params (replicated)
         jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq), 
         jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq),
-        P()       
+        jax.sharding.NamedSharding(mesh, P()),       
     )
     # Define output sharding (usually replicated or matches consumer needs)
     # Assuming output might be replicated or used on host later
     text_encode_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim)
     def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
         return text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
-        
+
     global_jitted_text_encode_func = jax.jit(
         wrap_text_encoder_apply,
         in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
