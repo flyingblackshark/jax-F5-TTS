@@ -762,7 +762,7 @@ def main(argv: Sequence[str]) -> None:
         with gr.Row():
             with gr.Column():
                 ref_text_input = gr.Textbox(label="Reference Text", info="Text corresponding to the reference audio.", value=DEFAULT_REF_TEXT, lines=3)
-                ref_audio_input = gr.Audio(label="Reference Audio", type="numpy")
+                ref_audio_input = gr.Audio(label="Reference Audio", type="numpy",value="https://github.com/flyingblackshark/jax-F5-TTS/raw/refs/heads/main/test.mp3")
                 gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
                 with gr.Row():
                     steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=20, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
