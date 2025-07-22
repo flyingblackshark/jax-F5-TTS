@@ -786,7 +786,7 @@ def main(argv: Sequence[str]) -> None:
 
     # Launch the Gradio app
     max_logging.log("Launching Gradio interface...")
-    iface.launch(share=True, server_name="0.0.0.0") # Allow external access if needed
+    iface.launch() # Allow external access if needed
 
 
 if __name__ == "__main__":
