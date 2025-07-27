@@ -1,7 +1,6 @@
 import gradio as gr # Import Gradio
-from typing import Callable, List, Union, Sequence, Tuple
+from typing import Sequence, Tuple
 from absl import app
-from contextlib import ExitStack
 import functools
 import numpy as np
 import jax
@@ -26,7 +25,6 @@ from maxdiffusion.utils.seq_utils import lens_to_mask
 # --- Configuration & Constants ---
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
-#MAX_DURATION_SECS = 40 # Maximum duration allowed for reference + generation combined (adjust as needed)
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
@@ -52,7 +50,6 @@ global_vocab_size = None
 global_p_run_inference = None
 global_data_sharding = None
 global_max_sequence_length = None # Will be set during setup
-#global_batch_size = None # Will be set during setup
 # --- Core Diffusion Loop Logic (Unchanged) ---
 
 def loop_body(
@@ -88,7 +85,6 @@ def loop_body(
         decoder_segment_ids=decoder_segment_ids,
         text_embed=text_embed_uncond,
         timestep=t_vec,
-        #drop_audio_cond=True,
     )
 
     # Classifier-Free Guidance
