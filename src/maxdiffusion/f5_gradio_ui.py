@@ -11,8 +11,6 @@ import flax
 from maxdiffusion import pyconfig, max_logging
 from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5TextEmbedding, F5Transformer2DModel
 from maxdiffusion.max_utils import (
-    device_put_replicated,
-    get_memory_allocations,
     create_device_mesh,
     get_flash_block_sizes,
     get_precision,
@@ -135,7 +133,6 @@ def generate_audio(
     guidance_scale: float = 2.0,
     speed_factor: float = 1.0, # <-- Add speed factor parameter
     use_sway_sampling: bool = False, # <-- Add sway sampling parameter
-    progress=gr.Progress(track_tqdm=True)
 ) -> Tuple[int, np.ndarray]:
     """
     Main function called by Gradio interface.
@@ -406,7 +403,6 @@ def generate_audio(
     p_ts = timesteps[1:]  # Previous timesteps (sigma_{t-1}, sigma_t in DDIM terms if reversed)
     # === End of Modified Timestep Calculation ===
 
-    # Run inference loop (using pre-compiled partial function)
     y_final_latents = global_p_run_inference_func(
         global_transformer_state, # Pass state
         latents,
@@ -422,9 +418,6 @@ def generate_audio(
     y_final_latents.block_until_ready()
     t_end_diffusion = time.time()
     max_logging.log(f"Diffusion sampling finished in {t_end_diffusion - t_start_diffusion:.2f}s.")
-    #get_memory_allocations()
-
-
     # --- Postprocessing (Vocoder) ---
     t_start_post = time.time()
     max_logging.log("Applying Vocoder...")
@@ -497,10 +490,6 @@ def generate_audio(
 
 # --- Setup Function ---
 def setup_models_and_state(config):
-    """
-    Initializes models, states, JIT compiles functions, etc.
-    Called once when the Gradio app starts.
-    """
     global global_config, global_mesh, global_transformer, global_transformer_state
     global global_transformer_state_shardings, global_text_encoder, global_text_encoder_params
     global global_jitted_text_encode_func, global_vocos_model, global_vocos_params
@@ -543,9 +532,6 @@ def setup_models_and_state(config):
     sharding_spec_get_mel_output = P(None, data_axis_name, None)
     # =================================================
 
-    # --- JIT Compile get_mel with Sharding ---
-    max_logging.log("Compiling get_mel with sharding...")
-    # Define the sharding for the input 'y'
     get_mel_in_shardings = (jax.sharding.NamedSharding(mesh, sharding_spec_get_mel_input),) # Tuple for positional args
     # Define the sharding for the output spectrogram
     #get_mel_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_replicated)
@@ -644,13 +630,6 @@ def setup_models_and_state(config):
     global_vocos_model, vocos_params_loaded = load_vocos_model(config.vocoder_model_path) # Add vocoder path to config
     global_vocos_params = flax.core.frozen_dict.FrozenDict(vocos_params_loaded) # Store globally
 
-    # JIT the vocoder apply function
-    # Need dummy input (output of diffusion model)
-    
-
-    rng_voc_init = jax.random.key(config.seed + 11)
-    rngs_voc_init = {'params': rng_voc_init, 'dropout': rng_voc_init}
-
     # Shard Vocoder Params (Replicated is usually sufficient)
     global_vocos_params = jax.device_put(global_vocos_params, jax.sharding.NamedSharding(mesh, P()))
     max_logging.log("Vocoder params replicated on devices.")
@@ -672,17 +651,8 @@ def setup_models_and_state(config):
         out_shardings=vocos_apply_out_shardings,
         static_argnums=()
     )
-    max_logging.log("Vocoder JIT.")
 
-
-    # --- Compile Inference Loop ---
-    max_logging.log("Compiling main inference loop...")
-
-    # Define data sharding for inputs passed to p_run_inference during execution
-    # Usually data-parallel along batch dimension
-    # Match sharding used inside generate_audio
     global_data_sharding = jax.sharding.NamedSharding(mesh, P(config.data_sharding[0])) # Assuming first axis is batch for data
-
 
     # Define shardings for inputs to run_inference
     # state sharding already defined: global_transformer_state_shardings
@@ -693,7 +663,6 @@ def setup_models_and_state(config):
 
     # Timesteps are usually replicated
     ts_sharding = jax.sharding.NamedSharding(mesh, P())
-
 
     # JIT the run_inference function
     # Use functools.partial to fix static arguments like model def, config, mesh
@@ -718,23 +687,12 @@ def setup_models_and_state(config):
     )
     # Output sharding (final latents) - should match data sharding probably
     out_shardings_inf = latents_sharding
-    # Optional: Compile run_inference once (can take time)
-    try:
-
-        global_p_run_inference_func = jax.jit(
-            partial_run_inference,
-            static_argnums=(), # No static args in the partial itself anymore
-            in_shardings=in_shardings_inf,
-            out_shardings=out_shardings_inf,
-        )
-        max_logging.log("Inference loop JIT compiled.")
-    except Exception as e:
-        max_logging.error(f"Failed to pre-compile inference loop: {e}")
-
-
-    t_end_setup = time.time()
-    max_logging.log(f"One-time setup completed in {t_end_setup - t_start_setup:.2f}s.")
-    get_memory_allocations()
+    global_p_run_inference_func = jax.jit(
+        partial_run_inference,
+        static_argnums=(), # No static args in the partial itself anymore
+        in_shardings=in_shardings_inf,
+        out_shardings=out_shardings_inf,
+    )
 
 # --- Main Execution Logic ---
 def main(argv: Sequence[str]) -> None:
