@@ -116,7 +116,7 @@ _deps = [
     "opencv-python-headless==4.10.0.84",
     "orbax-checkpoint",
     "tokenizers==0.21.0",
-    "huggingface_hub>=0.30.2",
+    "huggingface_hub",
     "transformers==4.48.1",
     "einops==0.8.0",
     "sentencepiece",
