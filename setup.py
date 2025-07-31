@@ -89,48 +89,52 @@ from setuptools import find_packages, setup
 # 1. all dependencies should be listed here with their version requirements if any
 # 2. once modified, run: `make deps_table_update` to update src/maxdiffusion/dependency_versions_table.py
 _deps = [
-    "Pillow",  # keep the PIL.Image.Resampling deprecation away
-    "accelerate>=0.11.0",
-    "compel==0.1.8",
-    "black~=23.1",
+    "jax>=0.6.2",
+    "jaxlib>=0.4.30",
+    "grain",
+    "google-cloud-storage>=2.17.0",
+    "absl-py",
     "datasets",
-    "filelock",
-    "flax>=0.4.1",
-    "hf-doc-builder>=0.3.0",
-    "huggingface-hub==0.30.0",
-    "requests-mock==1.10.0",
-    "importlib_metadata",
-    "invisible-watermark>=0.2.0",
-    "isort>=5.5.4",
-    "jax>=0.4.1",
-    "jaxlib>=0.4.1",
+    "flax>=0.10.2",
+    "optax>=0.2.3",
+    "torch>=2.6.0",
+    "torchvision>=0.20.1",
+    "ftfy",
+    "tensorboard>=2.17.0",
+    "tensorboardx>=2.6.2.2",
+    "tensorboard-plugin-profile>=2.15.2",
     "Jinja2",
-    "k-diffusion>=0.0.12",
-    "torchsde",
-    "note_seq",
-    "librosa",
-    "numpy",
-    "omegaconf",
+    "scikit-image",
     "parameterized",
-    "protobuf>=3.20.3,<4",
-    "pytest",
-    "pytest-timeout",
-    "pytest-xdist",
-    "ruff==0.0.280",
-    "safetensors>=0.3.1",
-    "sentencepiece>=0.1.91,!=0.1.92",
-    "scipy",
-    "onnx",
-    "regex!=2019.12.17",
-    "requests",
-    "tensorboard",
-    "torch>=1.4",
-    "torchvision",
-    "urllib3<=2.0.0",
+    "Pillow",
+    "pylint",
+    "pyink",
+    "pytest==8.2.2",
+    "tensorflow>=2.17.0",
+    "tensorflow-datasets>=4.9.6",
+    "ruff>=0.1.5,<=0.2",
+    "opencv-python-headless==4.10.0.84",
     "orbax-checkpoint",
-    "cloud-tpu-diagnostics",
-    "tensorboardx",
-    "tensorboard-plugin-profile"
+    "tokenizers==0.21.0",
+    "huggingface_hub>=0.30.2",
+    "transformers==4.48.1",
+    "einops==0.8.0",
+    "sentencepiece",
+    "aqtp",
+    "imageio==2.37.0",
+    "imageio-ffmpeg==0.6.0",
+    "hf_transfer>=0.1.9",
+    "audax",
+    "jieba",
+    "pypinyin",
+    "librosa",
+    "jax_vocos",
+    "filelock",
+    "numpy",
+    "regex",
+    "requests",
+    "safetensors",
+    "importlib_metadata"
 ]
 
 # this is a lookup table with items like:
@@ -201,28 +205,20 @@ extras = {}
 
 
 extras = {}
-extras["quality"] = deps_list("urllib3", "black", "isort", "ruff", "hf-doc-builder")
-extras["docs"] = deps_list("hf-doc-builder")
-extras["training"] = deps_list("accelerate", "datasets", "protobuf", "tensorboard", "Jinja2")
+extras["quality"] = deps_list("ruff", "pylint", "pyink")
+extras["docs"] = []
+extras["training"] = deps_list("datasets", "tensorboard", "Jinja2")
 extras["test"] = deps_list(
-    "compel",
     "datasets",
     "Jinja2",
-    "invisible-watermark",
-    "k-diffusion",
     "librosa",
-    "omegaconf",
     "parameterized",
     "pytest",
-    "pytest-timeout",
-    "pytest-xdist",
-    "requests-mock",
     "safetensors",
     "sentencepiece",
-    "scipy",
     "torchvision",
 )
-extras["torch"] = deps_list("torch", "accelerate")
+extras["torch"] = deps_list("torch")
 
 if os.name == "nt":  # windows
     extras["flax"] = []  # jax is not supported on windows
@@ -234,14 +230,26 @@ extras["dev"] = (
 )
 
 install_requires = [
-    deps["importlib_metadata"],
-    deps["filelock"],
-    deps["huggingface-hub"],
+    deps["jax"],
+    deps["jaxlib"],
+    deps["flax"],
+    deps["datasets"],
+    deps["torch"],
+    deps["torchvision"],
+    deps["tensorboard"],
+    deps["Jinja2"],
+    deps["Pillow"],
+    deps["librosa"],
+    deps["huggingface_hub"],
+    deps["transformers"],
+    deps["tokenizers"],
+    deps["sentencepiece"],
     deps["numpy"],
+    deps["filelock"],
     deps["regex"],
     deps["requests"],
     deps["safetensors"],
-    deps["Pillow"],
+    deps["importlib_metadata"],
 ]
 
 setup(
