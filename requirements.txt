@@ -23,7 +23,6 @@ pytest==8.2.2
 tensorflow>=2.17.0
 tensorflow-datasets>=4.9.6
 ruff>=0.1.5,<=0.2
-opencv-python-headless==4.10.0.84
 orbax-checkpoint
 tokenizers==0.21.0
 huggingface_hub
@@ -31,8 +30,6 @@ transformers==4.48.1
 einops==0.8.0
 sentencepiece
 aqtp
-imageio==2.37.0
-imageio-ffmpeg==0.6.0
 hf_transfer>=0.1.9
 audax
 jieba
