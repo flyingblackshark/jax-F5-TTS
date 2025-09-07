@@ -36,7 +36,7 @@ from maxdiffusion.max_utils import (
     setup_initial_state,
 )
 import time
-from maxdiffusion.models.modeling_flax_pytorch_utils import convert_f5_state_dict_to_flax
+from maxdiffusion.models.f5.f5_utils import convert_f5_torch_to_nnx
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
 import librosa
@@ -126,18 +126,18 @@ def run(config):
         weights_dtype=config.weights_dtype,
         precision=get_precision(config),
     )
-    transformer_params,text_encoder_params = convert_f5_state_dict_to_flax(config.pretrained_model_name_or_path,use_ema=config.use_ema)
-    weights_init_fn = functools.partial(transformer.init_weights, rngs=rng, max_sequence_length=config.max_sequence_length, eval_only=False)
-    transformer_state, transformer_state_shardings = setup_initial_state(
-        model=transformer,
-        tx=None,
-        config=config,
-        mesh=mesh,
-        weights_init_fn=weights_init_fn,
-        model_params=None,
-        training=False,
-    )
-    transformer_state = transformer_state.replace(params=transformer_params)
+    transformer_params,text_encoder_params = convert_f5_torch_to_nnx(config.pretrained_model_name_or_path)
+    # weights_init_fn = functools.partial(transformer.init_weights, rngs=rng, max_sequence_length=config.max_sequence_length, eval_only=False)
+    # transformer_state, transformer_state_shardings = setup_initial_state(
+    #     model=transformer,
+    #     tx=None,
+    #     config=config,
+    #     mesh=mesh,
+    #     weights_init_fn=weights_init_fn,
+    #     model_params=None,
+    #     training=False,
+    # )
+    #transformer_state = transformer_state.replace(params=transformer_params)
     transformer_state = jax.device_put(transformer_state, transformer_state_shardings)
     get_memory_allocations()
     num_devices = len(jax.devices())

@@ -18,8 +18,7 @@ from typing import Optional, Tuple
 import jax
 import math
 import jax.numpy as jnp
-import flax
-import flax.linen as nn
+from flax import nnx
 from einops import repeat, rearrange
 from ...normalization_flax import AdaLayerNormContinuous, AdaLayerNormZero
 from ...attention_flax import FlaxF5Attention
@@ -33,7 +32,7 @@ LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
 
-class F5TransformerBlock(nn.Module):
+class F5TransformerBlock(nnx.Module):
   r"""
   A Transformer block following the MMDiT architecture, introduced in Stable Diffusion 3.
 
@@ -47,65 +46,68 @@ class F5TransformerBlock(nn.Module):
           processing of `context` conditions.
   """
 
-  dim: int
-  num_attention_heads: int
-  attention_head_dim: int
-  qk_norm: str = "rms_norm"
-  eps: int = 1e-6
-  flash_min_seq_length: int = 4096
-  flash_block_sizes: BlockSizes = None
-  mesh: jax.sharding.Mesh = None
-  dtype: jnp.dtype = jnp.float32
-  weights_dtype: jnp.dtype = jnp.float32
-  precision: jax.lax.Precision = None
-  mlp_ratio: float = 4.0
-  qkv_bias: bool = False
-  attention_kernel: str = "dot_product"
 
-  def setup(self):
 
-    self.attn_norm = AdaLayerNormZero(self.dim, dtype=self.dtype, weights_dtype=self.weights_dtype, precision=self.precision)
+  def __init__(self,
+        dim: int,
+    num_attention_heads: int,
+    attention_head_dim: int,
+    qk_norm: str = "rms_norm",
+    eps: int = 1e-6,
+    flash_min_seq_length: int = 4096,
+    flash_block_sizes: BlockSizes = None,
+    mesh: jax.sharding.Mesh = None,
+    dtype: jnp.dtype = jnp.float32,
+    weights_dtype: jnp.dtype = jnp.float32,
+    precision: jax.lax.Precision = None,
+    mlp_ratio: float = 4.0,
+    qkv_bias: bool = False,
+    attention_kernel: str = "dot_product"):
+
+    self.attn_norm = AdaLayerNormZero(dim, dtype=dtype, weights_dtype=weights_dtype, precision=precision)
 
     self.attn = FlaxF5Attention(
-        query_dim=self.dim,
-        heads=self.num_attention_heads,
-        dim_head=self.attention_head_dim,
-        qkv_bias=self.qkv_bias,
+        query_dim=dim,
+        heads=num_attention_heads,
+        dim_head=attention_head_dim,
+        qkv_bias=qkv_bias,
         split_head_dim=False,
-        dtype=self.dtype,
-        weights_dtype=self.weights_dtype,
-        attention_kernel=self.attention_kernel,
-        mesh=self.mesh,
-        flash_block_sizes=self.flash_block_sizes,
+        dtype=dtype,
+        weights_dtype=weights_dtype,
+        attention_kernel=attention_kernel,
+        mesh=mesh,
+        flash_block_sizes=flash_block_sizes,
     )
 
-    self.ff_norm = nn.LayerNorm(
+    self.ff_norm = nnx.LayerNorm(
         use_bias=False,
         use_scale=False,
-        epsilon=self.eps,
-        dtype=self.dtype,
-        param_dtype=self.weights_dtype,
+        epsilon=eps,
+        dtype=dtype,
+        param_dtype=weights_dtype,
     )
-    self.ff = nn.Sequential(
+    self.ff = nnx.Sequential(
         [
-            nn.Dense(
-                int(self.dim * self.mlp_ratio),
+            nnx.Linear(
+                in_features=dim,
+                out_features=int(dim * mlp_ratio),
                 use_bias=True,
-                kernel_init=nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-                bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("mlp",)),
-                dtype=self.dtype,
-                param_dtype=self.weights_dtype,
-                precision=self.precision,
+                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
+                bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("mlp",)),
+                dtype=dtype,
+                param_dtype=weights_dtype,
+                precision=precision,
             ),
-            nn.gelu,
-            nn.Dense(
-                self.dim,
+            nnx.gelu,
+            nnx.Linear(
+                in_features=dim,
+                out_features=dim,
                 use_bias=True,
-                kernel_init=nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-                bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("mlp",)),
-                dtype=self.dtype,
-                param_dtype=self.weights_dtype,
-                precision=self.precision,
+                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
+                bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("mlp",)),
+                dtype=dtype,
+                param_dtype=weights_dtype,
+                precision=precision,
             ),
         ]
     )
@@ -135,58 +137,87 @@ class F5TransformerBlock(nn.Module):
 
 
 
-class ConvPositionEmbedding(nn.Module):
-    dim: int
-    kernel_size: int = 31
-    groups: int = 16
-    dtype: jnp.dtype = jnp.float32
-    weights_dtype: jnp.dtype = jnp.float32
-    precision: jax.lax.Precision = None
+class ConvPositionEmbedding(nnx.Module):
 
-    @nn.compact
+
+    def __init__(self,
+        dim: int,
+    kernel_size: int = 31,
+    groups: int = 16,
+    dtype: jnp.dtype = jnp.float32,
+    weights_dtype: jnp.dtype = jnp.float32,
+    precision: jax.lax.Precision = None,):
+        self.conv1d = nnx.Sequential([nnx.Conv(
+            in_features = dim,
+            out_features= dim,
+            kernel_size=(kernel_size,),
+            padding='SAME',
+            feature_group_count=groups,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,),
+            jax.nn.mish,
+            nnx.Conv(
+            in_features = dim,
+            out_features= dim,
+            kernel_size=(kernel_size,),
+            padding='SAME',
+            feature_group_count=groups,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,),
+            jax.nn.mish,
+            ])
+
+
     def __call__(self, x, mask=None):
         # 如果提供了 mask，则将 mask 扩展一个维度，并将对应位置置 0
         if mask is not None:
             mask_expanded = jnp.expand_dims(mask, axis=-1)  # (b, n, 1)
             x = jnp.where(mask_expanded, x, 0.0)
         
-        # 这里输入 x 的形状假定为 (batch, n, dim)
-        # 使用 SAME padding 保持序列长度不变
-        x = nn.Conv(
-            features=self.dim,
-            kernel_size=(self.kernel_size,),
-            padding='SAME',
-            feature_group_count=self.groups,
-            dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,)(x)
-        x = jax.nn.mish(x)
-        
-        if mask is not None:
-            x = jnp.where(mask_expanded, x, 0.0)
-        
-        x = nn.Conv(
-            features=self.dim,
-            kernel_size=(self.kernel_size,),
-            padding='SAME',
-            feature_group_count=self.groups,
-            dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,)(x)
-        x = jax.nn.mish(x)
+        x = self.conv1d(x)
         
         if mask is not None:
             x = jnp.where(mask_expanded, x, 0.0)
         return x
 
-class InputEmbedding(nn.Module):
-    mel_dim: int
-    text_dim: int
-    out_dim: int
-    dtype: jnp.dtype = jnp.float32
-    weights_dtype: jnp.dtype = jnp.float32
-    precision: jax.lax.Precision = None
-    @nn.compact
+class InputEmbedding(nnx.Module):
+    def __init__(self,
+                 mel_dim: int,
+                 text_dim: int,
+                 out_dim: int,
+                 dtype: jnp.dtype = jnp.float32,
+                 weights_dtype: jnp.dtype = jnp.float32,
+                 precision: jax.lax.Precision = None,
+                 *,
+                 rngs: nnx.Rngs):
+        self.mel_dim = mel_dim
+        self.text_dim = text_dim
+        self.out_dim = out_dim
+        self.dtype = dtype
+        self.weights_dtype = weights_dtype
+        self.precision = precision
+        
+        input_dim = mel_dim + mel_dim + text_dim  # x + cond + text_embed
+        self.proj = nnx.Linear(
+            in_features=input_dim,
+            out_features=out_dim,
+            use_bias=True,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,
+            rngs=rngs
+        )
+        
+        self.conv_pos_embed = ConvPositionEmbedding(
+            dim=out_dim,
+            dtype=dtype,
+            weights_dtype=weights_dtype,
+            precision=precision,
+            rngs=rngs
+        )
+    
     def __call__(self, x, 
                  cond, 
                  text_embed,
@@ -199,79 +230,105 @@ class InputEmbedding(nn.Module):
         
         # 将 x, cond, text_embed 在最后一个维度上拼接
         concat_input = jnp.concatenate([x, cond, text_embed], axis=-1)
-        x_proj = nn.Dense(
-            features=self.out_dim,
-            dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,)(concat_input)
+        x_proj = self.proj(concat_input)
         if decoder_segment_ids is not None:
             x_proj = x_proj * decoder_segment_ids[...,jnp.newaxis]
         # 将卷积位置编码加到投影结果上
-        x_out = x_proj + ConvPositionEmbedding(dim=self.out_dim,          
-                                               dtype=self.dtype,
-            weights_dtype=self.weights_dtype,
-            precision=self.precision,)(x_proj,mask=decoder_segment_ids)
+        x_out = x_proj + self.conv_pos_embed(x_proj, mask=decoder_segment_ids)
         if decoder_segment_ids is not None:
             x_out = x_out * decoder_segment_ids[...,jnp.newaxis]
         return x_out
     
-class GRN(nn.Module):
-    dim: int
-
-    @nn.compact
-    def __call__(self, x):
+class GRN(nnx.Module):
+    def __init__(self, dim: int, *, rngs: nnx.Rngs):
+        self.dim = dim
         # Initialize parameters gamma and beta with shape (1, 1, dim)
-        gamma = self.param("gamma", lambda rng, shape: jnp.zeros(shape), (1, 1, self.dim))
-        beta = self.param("beta", lambda rng, shape: jnp.zeros(shape), (1, 1, self.dim))
+        self.gamma = nnx.Param(jnp.zeros((1, 1, dim)))
+        self.beta = nnx.Param(jnp.zeros((1, 1, dim)))
+
+    def __call__(self, x):
         # Compute L2 norm over the sequence dimension (axis=1) with keepdims
         Gx = jnp.linalg.norm(x, ord=2, axis=1, keepdims=True)
         # Normalize: divide by mean across the feature dimension (axis=-1)
         Nx = Gx / (jnp.mean(Gx, axis=-1, keepdims=True) + 1e-6)
-        return gamma * (x * Nx) + beta + x
+        return self.gamma.value * (x * Nx) + self.beta.value + x
 
-class ConvNeXtV2Block(nn.Module):
-    dim: int
-    intermediate_dim: int
-    dilation: int = 1
-    dtype: jnp.dtype = jnp.float32
-    weights_dtype: jnp.dtype = jnp.float32
-    precision: jax.lax.Precision = None
-
-    @nn.compact
-    def __call__(self, x):
-        residual = x
+class ConvNeXtV2Block(nnx.Module):
+    def __init__(self,
+                 dim: int,
+                 intermediate_dim: int,
+                 dilation: int = 1,
+                 dtype: jnp.dtype = jnp.float32,
+                 weights_dtype: jnp.dtype = jnp.float32,
+                 precision: jax.lax.Precision = None,
+                 *,
+                 rngs: nnx.Rngs):
+        self.dim = dim
+        self.intermediate_dim = intermediate_dim
+        self.dilation = dilation
+        self.dtype = dtype
+        self.weights_dtype = weights_dtype
+        self.precision = precision
+        
         # Calculate symmetric padding so that output length matches input length.
         # For a kernel size of 7 and dilation d, padding = d*3.
-        padding = (self.dilation * (7 - 1)) // 2
-        # Depthwise convolution: we use feature_group_count=self.dim to apply a separate kernel per channel.
-        x = nn.Conv(
-            features=self.dim,
+        padding = (dilation * (7 - 1)) // 2
+        
+        # Depthwise convolution: we use feature_group_count=dim to apply a separate kernel per channel.
+        self.conv = nnx.Conv(
+            in_features=dim,
+            out_features=dim,
             kernel_size=(7,),
             strides=(1,),
             padding=((padding, padding),),
-            feature_group_count=self.dim,
-            input_dilation=(self.dilation,),
-            dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,
-        )(x)
+            feature_group_count=dim,
+            input_dilation=(dilation,),
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,
+            rngs=rngs
+        )
+        
         # Layer normalization (applied over the last dimension)
-        x = nn.LayerNorm(epsilon=1e-6,
-                dtype=self.dtype,
-                param_dtype=self.weights_dtype,)(x)
+        self.layer_norm = nnx.LayerNorm(
+            num_features=dim,
+            epsilon=1e-6,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            rngs=rngs
+        )
+        
         # First pointwise (dense) layer
-        x = nn.Dense(features=self.intermediate_dim,
-                    dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,)(x)
-        x = nn.gelu(x,approximate=False)
+        self.dense1 = nnx.Linear(
+            in_features=dim,
+            out_features=intermediate_dim,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,
+            rngs=rngs
+        )
+        
         # Apply GRN module on the intermediate features
-        x = GRN(dim=self.intermediate_dim)(x)
+        self.grn = GRN(dim=intermediate_dim, rngs=rngs)
+        
         # Second pointwise (dense) layer
-        x = nn.Dense(features=self.dim,
-                    dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,)(x)
+        self.dense2 = nnx.Linear(
+            in_features=intermediate_dim,
+            out_features=dim,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,
+            rngs=rngs
+        )
+
+    def __call__(self, x):
+        residual = x
+        x = self.conv(x)
+        x = self.layer_norm(x)
+        x = self.dense1(x)
+        x = nnx.gelu(x)
+        x = self.grn(x)
+        x = self.dense2(x)
         return residual + x
     
 
@@ -310,30 +367,48 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, theta_resca
     # Concatenate the cosine and sine parts along the last dimension.
     return jnp.concatenate([freqs_cos, freqs_sin], axis=-1)
 
-class F5TextEmbedding(nn.Module):
-
-    text_num_embeds:int
-    text_dim:int
-    conv_layers:int=0
-    conv_mult:int=2
-    theta:int = 1000
-    precompute_max_pos:int = 4096
-    dtype: jnp.dtype = jnp.float32
-    weights_dtype: jnp.dtype = jnp.float32
-    precision: jax.lax.Precision = None
-    def setup(self):
-        self.text_embed = nn.Embed(self.text_num_embeds + 1, self.text_dim, dtype=self.dtype)  # use 0 as filler token
+class F5TextEmbedding(nnx.Module):
+    def __init__(self,
+                 text_num_embeds: int,
+                 text_dim: int,
+                 conv_layers: int = 0,
+                 conv_mult: int = 2,
+                 theta: int = 1000,
+                 precompute_max_pos: int = 4096,
+                 dtype: jnp.dtype = jnp.float32,
+                 weights_dtype: jnp.dtype = jnp.float32,
+                 precision: jax.lax.Precision = None,
+                 *,
+                 rngs: nnx.Rngs):
+        self.text_num_embeds = text_num_embeds
+        self.text_dim = text_dim
+        self.conv_layers = conv_layers
+        self.conv_mult = conv_mult
+        self.theta = theta
+        self.precompute_max_pos = precompute_max_pos
+        self.dtype = dtype
+        self.weights_dtype = weights_dtype
+        self.precision = precision
         
-        if self.conv_layers > 0:
+        self.text_embed = nnx.Embed(
+            num_embeddings=text_num_embeds + 1,
+            features=text_dim,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            rngs=rngs
+        )  # use 0 as filler token
+        
+        if conv_layers > 0:
             self.extra_modeling = True
-            #self.precompute_max_pos = 4096  # ~44s of 24khz audio
-            self.freqs_cis = precompute_freqs_cis(self.text_dim, self.precompute_max_pos)
+            self.freqs_cis = precompute_freqs_cis(text_dim, precompute_max_pos)
             self.text_blocks = [ConvNeXtV2Block(
-            self.text_dim, self.text_dim * self.conv_mult,
-            dtype=self.dtype,
-            weights_dtype=self.weights_dtype,
-            precision=self.precision,) for _ in range(self.conv_layers)]
-            
+                dim=text_dim,
+                intermediate_dim=text_dim * conv_mult,
+                dtype=dtype,
+                weights_dtype=weights_dtype,
+                precision=precision,
+                rngs=rngs
+            ) for _ in range(conv_layers)]
         else:
             self.extra_modeling = False
 
@@ -362,48 +437,13 @@ class F5TextEmbedding(nn.Module):
                 text = text * text_decoder_segment_ids[...,jnp.newaxis]
 
         return text
-    def init_weights(self, rngs, max_sequence_length, eval_only=True):
-        num_devices = len(jax.devices())
-        batch_size = 1 * num_devices
-        decoder_segment_ids_shape = (
-            batch_size,
-            max_sequence_length
-        )
-        # bs, encoder_input, seq_length
-        txt_ids_shape = (
-            batch_size,
-            max_sequence_length
-        )
 
-        text_decoder_segment_ids_shape = (
-            batch_size,
-            max_sequence_length,
-        )
-        text_ids = jnp.zeros(txt_ids_shape, dtype=jnp.int32)
-        decoder_segment_ids = jnp.zeros(decoder_segment_ids_shape, dtype=jnp.int32)
-        text_decoder_segment_ids = jnp.zeros(text_decoder_segment_ids_shape,dtype=jnp.int32)
-        if eval_only:
-            return jax.eval_shape(
-                self.init,
-                    rngs,
-                    text=text_ids,
-                    seq_len=max_sequence_length,
-                    decoder_segment_ids=decoder_segment_ids,
-                    text_decoder_segment_ids=text_decoder_segment_ids,
-            )["params"]
-        else:
-            return self.init(
-                rngs,
-                text=text_ids,
-                seq_len=max_sequence_length,
-                decoder_segment_ids=decoder_segment_ids,
-                text_decoder_segment_ids=text_decoder_segment_ids,
-            )["params"]
 def exists(val):
     return val is not None
 
-class SinusPositionEmbedding(nn.Module):
-    dim: int
+class SinusPositionEmbedding(nnx.Module):
+    def __init__(self, dim: int):
+        self.dim = dim
 
     def __call__(self, x, scale: float = 1000.0):
         """
@@ -424,63 +464,76 @@ class SinusPositionEmbedding(nn.Module):
         cos_emb = jnp.cos(emb)
         return jnp.concatenate([sin_emb, cos_emb], axis=-1)
 
-class TimestepEmbedding(nn.Module):
-    dim: int
-    freq_embed_dim: int = 256
-    dtype: jnp.dtype = jnp.float32
-    weights_dtype: jnp.dtype = jnp.float32
-    precision: jax.lax.Precision = None
-
-    def setup(self):
+class TimestepEmbedding(nnx.Module):
+    def __init__(self,
+                 dim: int,
+                 freq_embed_dim: int = 256,
+                 dtype: jnp.dtype = jnp.float32,
+                 weights_dtype: jnp.dtype = jnp.float32,
+                 precision: jax.lax.Precision = None,
+                 *,
+                 rngs: nnx.Rngs):
+        self.dim = dim
+        self.freq_embed_dim = freq_embed_dim
+        self.dtype = dtype
+        self.weights_dtype = weights_dtype
+        self.precision = precision
+        
         # 创建 SinusPositionEmbedding 子模块
-        self.time_embed = SinusPositionEmbedding(dim=self.freq_embed_dim)
+        self.time_embed = SinusPositionEmbedding(dim=freq_embed_dim)
         # 定义 MLP，两层全连接，中间用 SiLU 激活函数
-        self.linear1 = nn.Dense(
-            features=self.dim,
-            dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,)
-        self.linear2 = nn.Dense(
-            features=self.dim,
-            dtype=self.dtype,
-            param_dtype=self.weights_dtype,
-            precision=self.precision,)
+        self.time_mlp = nnx.Sequential([nnx.Linear(
+            in_features=freq_embed_dim,
+            out_features=dim,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,
+            rngs=rngs
+        ),
+        jax.nn.silu,
+        nnx.Linear(
+            in_features=dim,
+            out_features=dim,
+            dtype=dtype,
+            param_dtype=weights_dtype,
+            precision=precision,
+            rngs=rngs
+        )])
 
     def __call__(self, timestep):
         """
         timestep: 一个 jnp.ndarray，形状通常为 (batch,)
         返回：形状为 (batch, dim) 的时间嵌入
         """
-        # 先通过正弦位置嵌入层
         time_hidden = self.time_embed(timestep)
-        # 保持数据类型一致（通常不需要额外转换，因为 JAX 会自动处理类型）
-        #time_hidden = time_hidden.astype(timestep.dtype)
-        # 通过 MLP 获得最终的时间嵌入
-        time = self.linear2(nn.silu(self.linear1(time_hidden)))
+        time = self.time_mlp(time_hidden)
         return time
     
-class RotaryEmbedding(nn.Module):
-    dim: int
-    use_xpos: bool = False
-    scale_base: float = 512.0
-    interpolation_factor: float = 1.0
-    base: float = 10000.0
-    base_rescale_factor: float = 1.0
+class RotaryEmbedding(nnx.Module):
+    def __init__(self,
+                 dim: int,
+                 use_xpos: bool = False,
+                 scale_base: float = 512.0,
+                 interpolation_factor: float = 1.0,
+                 base: float = 10000.0,
+                 base_rescale_factor: float = 1.0):
+        self.dim = dim
+        self.use_xpos = use_xpos
+        self.scale_base = scale_base
+        self.interpolation_factor = interpolation_factor
+        self.base = base
+        self.base_rescale_factor = base_rescale_factor
+        
+        base = base * (base_rescale_factor ** (dim / (dim - 2)))
 
-    def setup(self):
-        # proposed by reddit user bloc97, to rescale rotary embeddings to longer sequence length without fine-tuning
-        # has some connection to NTK literature
-        # https://www.reddit.com/r/LocalLLaMA/comments/14lz7j5/ntkaware_scaled_rope_allows_llama_models_to_have/
-        base = self.base * (self.base_rescale_factor ** (self.dim / (self.dim - 2)))
+        self.inv_freq = 1. / (base ** (jnp.arange(0, dim, 2).astype(jnp.float32) / dim))
 
-        self.inv_freq = 1. / (base ** (jnp.arange(0, self.dim, 2).astype(jnp.float32) / self.dim))
+        assert interpolation_factor >= 1.
 
-        assert self.interpolation_factor >= 1.
-
-        if not self.use_xpos:
-            self.scale = None # No need for register_buffer('scale', None)
+        if not use_xpos:
+            self.scale = None
         else:
-            self.scale = (jnp.arange(0, self.dim, 2) + 0.4 * self.dim) / (1.4 * self.dim)
+            self.scale = (jnp.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
 
 
     def forward_from_seq_len(self, seq_len: int):
@@ -506,76 +559,101 @@ class RotaryEmbedding(nn.Module):
 
         return freqs_complex, scale_complex
     
-class F5Transformer2DModel(nn.Module):
-  text_dim:int = 512
-  mel_dim:int = 100
-  dim:int = 1024
-  head_dim:int = 64
-  num_depth:int = 22
-  num_heads:int = 16
-
-  flash_min_seq_length: int = 4096
-  flash_block_sizes: BlockSizes = None
-  mesh: jax.sharding.Mesh = None
-  dtype: jnp.dtype = jnp.float32
-  weights_dtype: jnp.dtype = jnp.float32
-  precision: jax.lax.Precision = None
-  mlp_ratio: float = 2.0
-  qkv_bias: bool = True
-  theta: int = 1000
-  attention_kernel: str = "dot_product"
-  eps = 1e-6
-  def setup(self):
+class F5Transformer2DModel(nnx.Module):
+  def __init__(self,
+               text_dim: int = 512,
+               mel_dim: int = 100,
+               dim: int = 1024,
+               head_dim: int = 64,
+               num_depth: int = 22,
+               num_heads: int = 16,
+               flash_min_seq_length: int = 4096,
+               flash_block_sizes: BlockSizes = None,
+               mesh: jax.sharding.Mesh = None,
+               dtype: jnp.dtype = jnp.float32,
+               weights_dtype: jnp.dtype = jnp.float32,
+               precision: jax.lax.Precision = None,
+               mlp_ratio: float = 2.0,
+               qkv_bias: bool = True,
+               theta: int = 1000,
+               attention_kernel: str = "dot_product",
+               eps: float = 1e-6,
+               *,
+               rngs: nnx.Rngs):
+    self.text_dim = text_dim
+    self.mel_dim = mel_dim
+    self.dim = dim
+    self.head_dim = head_dim
+    self.num_depth = num_depth
+    self.num_heads = num_heads
+    self.flash_min_seq_length = flash_min_seq_length
+    self.flash_block_sizes = flash_block_sizes
+    self.mesh = mesh
+    self.dtype = dtype
+    self.weights_dtype = weights_dtype
+    self.precision = precision
+    self.mlp_ratio = mlp_ratio
+    self.qkv_bias = qkv_bias
+    self.theta = theta
+    self.attention_kernel = attention_kernel
+    self.eps = eps
+    
     self.time_embed = TimestepEmbedding(
-            dim=self.dim,
-            dtype=self.dtype,
-            weights_dtype=self.weights_dtype,
-            precision=self.precision,)
+        dim=dim,
+        dtype=dtype,
+        weights_dtype=weights_dtype,
+        precision=precision,
+        rngs=rngs
+    )
     self.input_embed = InputEmbedding(
-        mel_dim=self.mel_dim,
-        text_dim=self.text_dim,
-        out_dim=self.dim,
-        dtype=self.dtype,
-        weights_dtype=self.weights_dtype,
-        precision=self.precision,)
-    self.rotary_embed = RotaryEmbedding(self.head_dim)
+        mel_dim=mel_dim,
+        text_dim=text_dim,
+        out_dim=dim,
+        dtype=dtype,
+        weights_dtype=weights_dtype,
+        precision=precision,
+        rngs=rngs
+    )
+    self.rotary_embed = RotaryEmbedding(head_dim)
 
     blocks = []
-    for _ in range(self.num_depth):
+    for _ in range(num_depth):
       block = F5TransformerBlock(
-          dim=self.dim,
-          num_attention_heads=self.num_heads,
-          attention_head_dim=self.head_dim,
-          attention_kernel=self.attention_kernel,
-          flash_min_seq_length=self.flash_min_seq_length,
-          flash_block_sizes=self.flash_block_sizes,
-          mesh=self.mesh,
-          dtype=self.dtype,
-          weights_dtype=self.weights_dtype,
-          precision=self.precision,
-          mlp_ratio=self.mlp_ratio,
-          qkv_bias=self.qkv_bias,
+          dim=dim,
+          num_attention_heads=num_heads,
+          attention_head_dim=head_dim,
+          attention_kernel=attention_kernel,
+          flash_min_seq_length=flash_min_seq_length,
+          flash_block_sizes=flash_block_sizes,
+          mesh=mesh,
+          dtype=dtype,
+          weights_dtype=weights_dtype,
+          precision=precision,
+          mlp_ratio=mlp_ratio,
+          qkv_bias=qkv_bias,
       )
       blocks.append(block)
     self.blocks = blocks
 
     self.norm_out = AdaLayerNormContinuous(
-        self.dim,
+        dim,
         elementwise_affine=False,
-        eps=self.eps,
-        dtype=self.dtype,
-        weights_dtype=self.weights_dtype,
-        precision=self.precision,
+        eps=eps,
+        dtype=dtype,
+        weights_dtype=weights_dtype,
+        precision=precision,
     )
 
-    self.proj_out = nn.Dense(
-        self.mel_dim,
-        kernel_init=nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", None)),
-        bias_init=nn.with_logical_partitioning(nn.initializers.zeros, (None,)),
-        dtype=self.dtype,
-        param_dtype=self.weights_dtype,
-        precision=self.precision,
+    self.proj_out = nnx.Linear(
+        in_features=dim,
+        out_features=mel_dim,
+        kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("mlp", None)),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, (None,)),
+        dtype=dtype,
+        param_dtype=weights_dtype,
+        precision=precision,
         use_bias=True,
+        rngs=rngs
     )
 
   def __call__(

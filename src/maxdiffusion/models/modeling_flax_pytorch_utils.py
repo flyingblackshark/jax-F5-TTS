@@ -15,17 +15,61 @@
 """ PyTorch - Flax general utilities."""
 import re
 
+import torch
 import jax
 import jax.numpy as jnp
 from flax.linen import Partitioned
 from flax.traverse_util import flatten_dict, unflatten_dict
 from flax.core.frozen_dict import unfreeze
 from jax.random import PRNGKey
-
+from chex import Array
 from ..utils import logging
+from .. import max_logging
+from .. import common_types
 
 
 logger = logging.get_logger(__name__)
+
+
+def validate_flax_state_dict(expected_pytree: dict, new_pytree: dict):
+  """
+  expected_pytree: dict - a pytree that comes from initializing the model.
+  new_pytree: dict - a pytree that has been created from pytorch weights.
+  """
+  expected_pytree = flatten_dict(expected_pytree)
+  if len(expected_pytree.keys()) != len(new_pytree.keys()):
+    set1 = set(expected_pytree.keys())
+    set2 = set(new_pytree.keys())
+    missing_keys = set1 ^ set2
+    max_logging.log(f"missing keys : {missing_keys}")
+  for key in expected_pytree.keys():
+    if key in new_pytree.keys():
+      try:
+        expected_pytree_shape = expected_pytree[key].shape
+      except Exception:
+        expected_pytree_shape = expected_pytree[key].value.shape
+      if expected_pytree_shape != new_pytree[key].shape:
+        max_logging.log(f"shape mismatch for {key}")
+        max_logging.log(
+            f"shape mismatch, expected shape of {expected_pytree[key].shape}, but got shape of {new_pytree[key].shape}"
+        )
+    else:
+      max_logging.log(f"key: {key} not found...")
+
+
+def torch2jax(torch_tensor: torch.Tensor) -> Array:
+  is_bfloat16 = torch_tensor.dtype == torch.bfloat16
+  if is_bfloat16:
+    # upcast the tensor to fp32
+    torch_tensor = torch_tensor.float()
+
+  if torch.device.type != "cpu":
+    torch_tensor = torch_tensor.to("cpu")
+
+  numpy_value = torch_tensor.numpy()
+  local_cpu_device_0 = jax.local_devices(backend="cpu")[0]
+  jax_array = jnp.array(numpy_value, dtype=jnp.bfloat16 if is_bfloat16 else None, device=local_cpu_device_0)
+  return jax_array
 
 
 def rename_key(key):
@@ -43,7 +87,7 @@ def rename_key(key):
 
 # Adapted from https://github.com/huggingface/transformers/blob/c603c80f46881ae18b2ca50770ef65fa4033eacd/src/transformers/modeling_flax_pytorch_utils.py#L69
 # and https://github.com/patil-suraj/stable-diffusion-jax/blob/main/stable_diffusion_jax/convert_diffusers_to_jax.py
-def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dict):
+def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dict, model_type=None):
   """Rename PT weight names to corresponding Flax weight names and reshape tensor if necessary"""
   # conv norm or layer norm
   renamed_pt_tuple_key = pt_tuple_key[:-1] + ("scale",)
@@ -66,9 +110,17 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dic
         renamed_pt_tuple_key = pt_tuple_key[:-2] + (rename_to, weight_name)
         if renamed_pt_tuple_key in random_flax_state_dict:
           if isinstance(random_flax_state_dict[renamed_pt_tuple_key], Partitioned):
-            assert random_flax_state_dict[renamed_pt_tuple_key].value.shape == pt_tensor.T.shape
+            # Wan 2.1 uses nnx.scan and nnx.vmap which stacks layer weights which will cause a shape mismatch
+            # from the original weights which are not stacked.
+            if model_type is not None and model_type == common_types.WAN_MODEL:
+              pass
+            else:
+              assert random_flax_state_dict[renamed_pt_tuple_key].value.shape == pt_tensor.T.shape
           else:
-            assert random_flax_state_dict[renamed_pt_tuple_key].shape == pt_tensor.T.shape
+            if model_type is not None and model_type == common_types.WAN_MODEL:
+              pass
+            else:
+              assert random_flax_state_dict[renamed_pt_tuple_key].shape == pt_tensor.T.shape
           return renamed_pt_tuple_key, pt_tensor.T
 
   if (
@@ -94,6 +146,12 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dic
     pt_tensor = pt_tensor.transpose(2, 3, 1, 0)
     return renamed_pt_tuple_key, pt_tensor
 
+  # 3d conv layer
+  renamed_pt_tuple_key = pt_tuple_key[:-1] + ("kernel",)
+  if pt_tuple_key[-1] == "weight" and pt_tensor.ndim == 5:
+    pt_tensor = pt_tensor.transpose(2, 3, 4, 1, 0)
+    return renamed_pt_tuple_key, pt_tensor
+
   # linear layer
   renamed_pt_tuple_key = pt_tuple_key[:-1] + ("kernel",)
   if pt_tuple_key[-1] == "weight":
@@ -103,6 +161,8 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dic
   # old PyTorch layer norm weight
   renamed_pt_tuple_key = pt_tuple_key[:-1] + ("weight",)
   if pt_tuple_key[-1] == "gamma":
+    renamed_pt_tuple_key = pt_tuple_key
+    pt_tensor = pt_tensor.flatten()
     return renamed_pt_tuple_key, pt_tensor
 
   # old PyTorch layer norm bias
@@ -325,76 +385,3 @@ def convert_pytorch_state_dict_to_flax(pt_state_dict, flax_model, init_key=42):
     flax_state_dict[flax_key] = jax.device_put(jnp.asarray(flax_tensor), device=cpu)
 
   return unflatten_dict(flax_state_dict)
-
-def convert_f5_state_dict_to_flax(path,use_ema=True):
-  import torch
-  
-  state_dict = torch.load(path,map_location=torch.device('cpu'))
-  if use_ema:
-    state_dict["model_state_dict"] = {
-        k.replace("ema_model.", ""): v
-        for k, v in state_dict["ema_model_state_dict"].items()
-        if k not in ["initted", "step"]
-    }
-  state_dict = state_dict["model_state_dict"]
-  params = {}
-  text_encoder_params = {}
-
-  params[f"time_embed.linear1.kernel"] = state_dict[f"transformer.time_embed.time_mlp.0.weight"].T
-  params[f"time_embed.linear1.bias"] = state_dict[f"transformer.time_embed.time_mlp.0.bias"]
-  params[f"time_embed.linear2.kernel"] = state_dict[f"transformer.time_embed.time_mlp.2.weight"].T
-  params[f"time_embed.linear2.bias"] = state_dict[f"transformer.time_embed.time_mlp.2.bias"]
-
-
-  text_encoder_params["text_embed.embedding"] = state_dict["transformer.text_embed.text_embed.weight"]
-  for i in range(4):
-    text_encoder_params[f"text_blocks_{i}.Conv_0.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.dwconv.weight"].transpose(0,2)
-    text_encoder_params[f"text_blocks_{i}.Conv_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.dwconv.bias"]
-    text_encoder_params[f"text_blocks_{i}.GRN_0.gamma"] = state_dict[f"transformer.text_embed.text_blocks.{i}.grn.gamma"]
-    text_encoder_params[f"text_blocks_{i}.GRN_0.beta"] = state_dict[f"transformer.text_embed.text_blocks.{i}.grn.beta"]
-    text_encoder_params[f"text_blocks_{i}.LayerNorm_0.scale"] = state_dict[f"transformer.text_embed.text_blocks.{i}.norm.weight"].T
-    text_encoder_params[f"text_blocks_{i}.LayerNorm_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.norm.bias"]
-    text_encoder_params[f"text_blocks_{i}.Dense_0.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv1.weight"].T
-    text_encoder_params[f"text_blocks_{i}.Dense_0.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv1.bias"]
-    text_encoder_params[f"text_blocks_{i}.Dense_1.kernel"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv2.weight"].T
-    text_encoder_params[f"text_blocks_{i}.Dense_1.bias"] = state_dict[f"transformer.text_embed.text_blocks.{i}.pwconv2.bias"]
-
-
-
-  params[f"input_embed.Dense_0.kernel"] = state_dict[f"transformer.input_embed.proj.weight"].T
-  params[f"input_embed.Dense_0.bias"] = state_dict[f"transformer.input_embed.proj.bias"]
-  params[f"input_embed.ConvPositionEmbedding_0.Conv_0.kernel"] = state_dict[f"transformer.input_embed.conv_pos_embed.conv1d.0.weight"].transpose(0,2)
-  params[f"input_embed.ConvPositionEmbedding_0.Conv_0.bias"] = state_dict[f"transformer.input_embed.conv_pos_embed.conv1d.0.bias"]
-  params[f"input_embed.ConvPositionEmbedding_0.Conv_1.kernel"] = state_dict[f"transformer.input_embed.conv_pos_embed.conv1d.2.weight"].transpose(0,2)
-  params[f"input_embed.ConvPositionEmbedding_0.Conv_1.bias"] = state_dict[f"transformer.input_embed.conv_pos_embed.conv1d.2.bias"]
-
-
-
-  for i in range(22):
-    params[f"blocks_{i}.attn.to_k.kernel"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_k.weight"].T
-    params[f"blocks_{i}.attn.to_k.bias"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_k.bias"]
-    params[f"blocks_{i}.attn.to_q.kernel"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_q.weight"].T
-    params[f"blocks_{i}.attn.to_q.bias"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_q.bias"]
-    params[f"blocks_{i}.attn.to_v.kernel"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_v.weight"].T
-    params[f"blocks_{i}.attn.to_v.bias"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_v.bias"]
-    params[f"blocks_{i}.attn.to_out_0.kernel"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_out.0.weight"].T
-    params[f"blocks_{i}.attn.to_out_0.bias"] = state_dict[f"transformer.transformer_blocks.{i}.attn.to_out.0.bias"]
-    params[f"blocks_{i}.attn_norm.lin.kernel"] = state_dict[f"transformer.transformer_blocks.{i}.attn_norm.linear.weight"].T
-    params[f"blocks_{i}.attn_norm.lin.bias"] = state_dict[f"transformer.transformer_blocks.{i}.attn_norm.linear.bias"]
-    params[f"blocks_{i}.ff.layers_0.kernel"] = state_dict[f"transformer.transformer_blocks.{i}.ff.ff.0.0.weight"].T
-    params[f"blocks_{i}.ff.layers_0.bias"] = state_dict[f"transformer.transformer_blocks.{i}.ff.ff.0.0.bias"]
-    params[f"blocks_{i}.ff.layers_2.kernel"] = state_dict[f"transformer.transformer_blocks.{i}.ff.ff.2.weight"].T
-    params[f"blocks_{i}.ff.layers_2.bias"] = state_dict[f"transformer.transformer_blocks.{i}.ff.ff.2.bias"]
-
-
-  params[f"proj_out.kernel"] = state_dict[f"transformer.proj_out.weight"].T
-  params[f"proj_out.bias"] = state_dict[f"transformer.proj_out.bias"]
-  
-  params[f"norm_out.Dense_0.kernel"] = state_dict[f"transformer.norm_out.linear.weight"].T
-  params[f"norm_out.Dense_0.bias"] = state_dict[f"transformer.norm_out.linear.bias"]
-  params = {k: v.cpu().numpy() for k, v in params.items()}
-  params = unflatten_dict(params, sep=".")
-  text_encoder_params = {k: v.cpu().numpy() for k, v in text_encoder_params.items()}
-  text_encoder_params = unflatten_dict(text_encoder_params, sep=".")
-
-  return params,text_encoder_params
