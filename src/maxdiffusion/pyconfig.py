@@ -16,6 +16,7 @@
 
 # pylint: disable=missing-module-docstring
 import os
+import ast
 import json
 import sys
 from collections import OrderedDict
@@ -25,6 +26,8 @@ import jax
 import yaml
 from . import max_logging
 from . import max_utils
+from .models.wan.wan_utils import CAUSVID_TRANSFORMER_MODEL_NAME_OR_PATH, WAN_21_FUSION_X_MODEL_NAME_OR_PATH
+from maxdiffusion.common_types import LENGTH, KV_LENGTH
 
 
 def string_to_bool(s: str) -> bool:
@@ -35,7 +38,11 @@ def string_to_bool(s: str) -> bool:
   raise ValueError(f"Can't convert {s} to bool")
 
 
-_yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool}
+def string_to_list(string_list: str) -> list:
+  return ast.literal_eval(string_list)
+
+
+_yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool, list: string_to_list}
 
 _config = None
 config = None
@@ -102,6 +109,7 @@ class _HyperParameters:
       jax.config.update("jax_compilation_cache_dir", raw_keys["jax_cache_dir"])
 
     _HyperParameters.user_init(raw_keys)
+    _HyperParameters.wan_init(raw_keys)
     self.keys = raw_keys
     for k in sorted(raw_keys.keys()):
       max_logging.log(f"Config param {k}: {raw_keys[k]}")
@@ -109,6 +117,49 @@ class _HyperParameters:
   def _load_kwargs(self, argv: list[str]):
     args_dict = dict(a.split("=", 1) for a in argv[2:])
     return args_dict
+
+  @staticmethod
+  def wan_init(raw_keys):
+    if not any("layers_per_stage" in inner_tuple for inner_tuple in raw_keys["logical_axis_rules"]):
+      raw_keys["logical_axis_rules"] += (("layers_per_stage", None),)
+    if "wan_transformer_pretrained_model_name_or_path" in raw_keys:
+      transformer_pretrained_model_name_or_path = raw_keys["wan_transformer_pretrained_model_name_or_path"]
+      if transformer_pretrained_model_name_or_path == "":
+        raw_keys["wan_transformer_pretrained_model_name_or_path"] = raw_keys["pretrained_model_name_or_path"]
+      elif (
+          transformer_pretrained_model_name_or_path == CAUSVID_TRANSFORMER_MODEL_NAME_OR_PATH
+          or transformer_pretrained_model_name_or_path == WAN_21_FUSION_X_MODEL_NAME_OR_PATH
+      ):
+        # Set correct parameters for CausVid in case of user error.
+        raw_keys["guidance_scale"] = 1.0
+        num_inference_steps = raw_keys["num_inference_steps"]
+        if num_inference_steps > 10:
+          max_logging.log(
+              f"Warning: Try setting num_inference_steps to less than 10 steps when using CausVid, currently you are setting {num_inference_steps} steps."
+          )
+      else:
+        raise ValueError(f"{transformer_pretrained_model_name_or_path} transformer model is not supported for Wan 2.1")
+    if "use_qwix_quantization" not in raw_keys:
+      raise ValueError("use_qwix_quantization is not set.")
+    elif raw_keys["use_qwix_quantization"]:
+      if "quantization" not in raw_keys:
+        raise ValueError("Quantization type is not set when use_qwix_quantization is enabled.")
+      elif raw_keys["quantization"] not in ["int8", "fp8", "fp8_full"]:
+        raise ValueError(
+            f"Quantization type is not supported when use_qwix_quantization is enabled: {raw_keys['quantization']}"
+        )
+
+  @staticmethod
+  def calculate_global_batch_sizes(per_device_batch_size):
+    num_devices = len(jax.devices())
+    if per_device_batch_size < 1:
+      # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
+      global_batch_size_to_load = num_devices
+    else:
+      global_batch_size_to_load = int(num_devices * per_device_batch_size)
+
+    global_batch_size_to_train_on = int(num_devices * per_device_batch_size)
+    return global_batch_size_to_load, global_batch_size_to_train_on
 
   @staticmethod
   def user_init(raw_keys):
@@ -127,6 +178,17 @@ class _HyperParameters:
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
 
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
+    # Verify qkv is sharded across sequence.
+    if raw_keys["attention"] == "ring":
+      logical_axis_rules = list(raw_keys["logical_axis_rules"])
+      q_seq_sharding = (LENGTH, "fsdp")
+      kv_seq_sharding = (KV_LENGTH, "fsdp")
+      if q_seq_sharding not in logical_axis_rules:
+        logical_axis_rules.append(q_seq_sharding)
+      if kv_seq_sharding not in logical_axis_rules:
+        logical_axis_rules.append(kv_seq_sharding)
+      raw_keys["logical_axis_rules"] = tuple(logical_axis_rules)
+
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     if raw_keys["learning_rate_schedule_steps"] == -1:
@@ -154,6 +216,9 @@ class _HyperParameters:
     raw_keys["total_train_batch_size"] = max_utils.get_global_batch_size(raw_keys["per_device_batch_size"])
     raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+    raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"] = (
+        _HyperParameters.calculate_global_batch_sizes(raw_keys["per_device_batch_size"])
+    )
 
 
 def get_num_slices(raw_keys):

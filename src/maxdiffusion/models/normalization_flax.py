@@ -16,10 +16,10 @@
 
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
+import flax as nnx
 
 
-class AdaLayerNormContinuous(nn.Module):
+class AdaLayerNormContinuous(nnx.Module):
   embedding_dim: int
   elementwise_affine: bool = True
   eps: float = 1e-5
@@ -49,7 +49,7 @@ class AdaLayerNormContinuous(nn.Module):
     return x
 
 
-class AdaLayerNormZero(nn.Module):
+class AdaLayerNormZero(nnx.Module):
   r"""
   Norm layer adaptive layer norm zero (adaLN-Zero).
 

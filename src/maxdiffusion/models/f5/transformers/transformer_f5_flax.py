@@ -62,9 +62,16 @@ class F5TransformerBlock(nnx.Module):
     precision: jax.lax.Precision = None,
     mlp_ratio: float = 4.0,
     qkv_bias: bool = False,
-    attention_kernel: str = "dot_product"):
+    attention_kernel: str = "dot_product",
+    *,
+    rngs: nnx.Rngs
+    ):
 
-    self.attn_norm = AdaLayerNormZero(dim, dtype=dtype, weights_dtype=weights_dtype, precision=precision)
+    self.attn_norm = AdaLayerNormZero(dim, 
+                                      dtype=dtype, 
+                                      weights_dtype=weights_dtype, 
+                                      precision=precision,
+                                      rngs=rngs)
 
     self.attn = FlaxF5Attention(
         query_dim=dim,
@@ -77,14 +84,17 @@ class F5TransformerBlock(nnx.Module):
         attention_kernel=attention_kernel,
         mesh=mesh,
         flash_block_sizes=flash_block_sizes,
+        rngs=rngs,
     )
 
     self.ff_norm = nnx.LayerNorm(
+        num_features=dim,
         use_bias=False,
         use_scale=False,
         epsilon=eps,
         dtype=dtype,
         param_dtype=weights_dtype,
+        rngs=rngs
     )
     self.ff = nnx.Sequential(
         [
@@ -97,6 +107,7 @@ class F5TransformerBlock(nnx.Module):
                 dtype=dtype,
                 param_dtype=weights_dtype,
                 precision=precision,
+                rngs=rngs,
             ),
             nnx.gelu,
             nnx.Linear(
@@ -108,6 +119,7 @@ class F5TransformerBlock(nnx.Module):
                 dtype=dtype,
                 param_dtype=weights_dtype,
                 precision=precision,
+                rngs=rngs,
             ),
         ]
     )
@@ -146,7 +158,9 @@ class ConvPositionEmbedding(nnx.Module):
     groups: int = 16,
     dtype: jnp.dtype = jnp.float32,
     weights_dtype: jnp.dtype = jnp.float32,
-    precision: jax.lax.Precision = None,):
+    precision: jax.lax.Precision = None,
+    *,
+    rngs: nnx.Rngs):
         self.conv1d = nnx.Sequential([nnx.Conv(
             in_features = dim,
             out_features= dim,
@@ -155,7 +169,8 @@ class ConvPositionEmbedding(nnx.Module):
             feature_group_count=groups,
             dtype=dtype,
             param_dtype=weights_dtype,
-            precision=precision,),
+            precision=precision,
+            rngs=rngs,),
             jax.nn.mish,
             nnx.Conv(
             in_features = dim,
@@ -165,7 +180,8 @@ class ConvPositionEmbedding(nnx.Module):
             feature_group_count=groups,
             dtype=dtype,
             param_dtype=weights_dtype,
-            precision=precision,),
+            precision=precision,
+            rngs=rngs,),
             jax.nn.mish,
             ])
 
@@ -616,9 +632,7 @@ class F5Transformer2DModel(nnx.Module):
     )
     self.rotary_embed = RotaryEmbedding(head_dim)
 
-    blocks = []
-    for _ in range(num_depth):
-      block = F5TransformerBlock(
+    self.transformer_blocks = [F5TransformerBlock(
           dim=dim,
           num_attention_heads=num_heads,
           attention_head_dim=head_dim,
@@ -631,9 +645,9 @@ class F5Transformer2DModel(nnx.Module):
           precision=precision,
           mlp_ratio=mlp_ratio,
           qkv_bias=qkv_bias,
-      )
-      blocks.append(block)
-    self.blocks = blocks
+          rngs=rngs,
+      ) for _ in range(num_depth)]
+
 
     self.norm_out = AdaLayerNormContinuous(
         dim,
@@ -665,7 +679,8 @@ class F5Transformer2DModel(nnx.Module):
       decoder_segment_ids, #mask
       #text_decoder_segment_ids,#text mask
       #drop_audio_cond:bool = False,
-      train: bool = False,
+      deterministic: bool = True,
+      rngs: nnx.Rngs = None,
   ):
     batch, seq_len = x.shape[0], x.shape[1]
     
@@ -679,7 +694,7 @@ class F5Transformer2DModel(nnx.Module):
     image_rotary_emb = self.rotary_embed.forward_from_seq_len(seq_len)
     #image_rotary_emb = nn.with_logical_constraint(image_rotary_emb, ("activation_batch", "activation_embed"))
 
-    for block in self.blocks:
+    for block in self.transformer_blocks:
       x = block(
           x=x,
           temb=t,
@@ -690,46 +705,3 @@ class F5Transformer2DModel(nnx.Module):
     x = self.norm_out(x, t)
     output = self.proj_out(x)
     return output
-
-  def init_weights(self, rngs, max_sequence_length, eval_only=True):
-    num_devices = len(jax.devices())
-    batch_size = 1 * num_devices
-    batch_image_shape = (
-        batch_size,
-        max_sequence_length,
-        100
-    )
-    decoder_segment_ids_shape = (
-        batch_size,
-        max_sequence_length
-    )
-    # bs, encoder_input, seq_length
-    text_embed_shape = (
-        batch_size,
-        max_sequence_length,
-        512
-    )
-
-    img = jnp.zeros(batch_image_shape, dtype=self.dtype)
-    text_embed = jnp.zeros(text_embed_shape, dtype=jnp.int32)
-    decoder_segment_ids = jnp.zeros(decoder_segment_ids_shape, dtype=jnp.int32)
-    t = jnp.asarray((0,))
-    if eval_only:
-      return jax.eval_shape(
-          self.init,
-            rngs,
-            x=img,
-            cond=img,
-            text_embed=text_embed,
-            timestep=t,
-            decoder_segment_ids=decoder_segment_ids,
-      )["params"]
-    else:
-        return self.init(
-            rngs,
-            x=img,
-            cond=img,
-            text_embed=text_embed,
-            timestep=t,
-            decoder_segment_ids=decoder_segment_ids,
-        )["params"]

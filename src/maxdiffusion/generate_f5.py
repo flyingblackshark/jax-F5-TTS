@@ -13,13 +13,11 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 """
-
+from safetensors import safe_open
 from typing import Callable, List, Union, Sequence
 from absl import app
 from contextlib import ExitStack
 import functools
-import jax.experimental
-import jax.experimental.compilation_cache.compilation_cache
 import numpy as np
 import jax
 from jax.sharding import Mesh, PartitionSpec as P
@@ -36,14 +34,58 @@ from maxdiffusion.max_utils import (
     setup_initial_state,
 )
 import time
-from maxdiffusion.models.f5.f5_utils import convert_f5_torch_to_nnx
+from maxdiffusion.models.f5.f5_utils import convert_f5_transformer_torch_to_nnx
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
 import librosa
-import jax.experimental.compilation_cache
 from maxdiffusion.utils.seq_utils import lens_to_mask
-jax.experimental.compilation_cache.compilation_cache.set_cache_dir("./jax_cache")
+from flax import nnx
+import flax.linen as nn
+from maxdiffusion.models.modeling_flax_pytorch_utils import (rename_key, rename_key_and_reshape_tensor, torch2jax, validate_flax_state_dict)
+from flax.traverse_util import unflatten_dict, flatten_dict
 cfg_strength = 2
+def _tuple_str_to_int(in_tuple):
+  out_list = []
+  for item in in_tuple:
+    try:
+      out_list.append(int(item))
+    except ValueError:
+      out_list.append(item)
+  return tuple(out_list)
+
+
+def rename_for_nnx(key):
+  new_key = key
+  if "norm_k" in key or "norm_q" in key:
+    new_key = key[:-1] + ("scale",)
+  return new_key
+
+
+def rename_for_custom_trasformer(key):
+  renamed_pt_key = key.replace("model.diffusion_model.", "")
+
+  renamed_pt_key = renamed_pt_key.replace("head.modulation", "scale_shift_table")
+  renamed_pt_key = renamed_pt_key.replace("head.head", "proj_out")
+  renamed_pt_key = renamed_pt_key.replace("text_embedding_0", "condition_embedder.text_embedder.linear_1")
+  renamed_pt_key = renamed_pt_key.replace("text_embedding_2", "condition_embedder.text_embedder.linear_2")
+  renamed_pt_key = renamed_pt_key.replace("time_embedding_0", "condition_embedder.time_embedder.linear_1")
+  renamed_pt_key = renamed_pt_key.replace("time_embedding_2", "condition_embedder.time_embedder.linear_2")
+  renamed_pt_key = renamed_pt_key.replace("time_projection_1", "condition_embedder.time_proj")
+
+  renamed_pt_key = renamed_pt_key.replace("blocks_", "blocks.")
+  renamed_pt_key = renamed_pt_key.replace("self_attn", "attn1")
+  renamed_pt_key = renamed_pt_key.replace("cross_attn", "attn2")
+  renamed_pt_key = renamed_pt_key.replace(".q.", ".query.")
+  renamed_pt_key = renamed_pt_key.replace(".k.", ".key.")
+  renamed_pt_key = renamed_pt_key.replace(".v.", ".value.")
+  renamed_pt_key = renamed_pt_key.replace(".o.", ".proj_attn.")
+  renamed_pt_key = renamed_pt_key.replace("ffn_0", "ffn.act_fn.proj")
+  renamed_pt_key = renamed_pt_key.replace("ffn_2", "ffn.proj_out")
+  renamed_pt_key = renamed_pt_key.replace(".modulation", ".scale_shift_table")
+  renamed_pt_key = renamed_pt_key.replace("norm3", "norm2.layer_norm")
+
+  return renamed_pt_key
+
 def loop_body(
     step,
     args,
@@ -103,6 +145,7 @@ def run_inference(
 def run(config):
   
     rng = jax.random.key(config.seed)
+    rngs = nnx.Rngs(rng)
     devices_array = create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
@@ -111,22 +154,81 @@ def run(config):
 
     # LOAD TRANSFORMER
     flash_block_sizes = get_flash_block_sizes(config)
-    transformer = F5Transformer2DModel(
-        text_dim=config.text_dim, # Make sure text_dim is in config
-        mel_dim=config.mel_dim, # Make sure mel_dim is in config
-        dim=config.latent_dim, # Make sure latent_dim is in config
-        head_dim=config.head_dim,
-        num_depth=config.num_depth,
-        num_heads=config.num_heads,
 
-        mesh=mesh,
-        attention_kernel=config.attention,
-        flash_block_sizes=flash_block_sizes,
-        dtype=config.activations_dtype,
-        weights_dtype=config.weights_dtype,
-        precision=get_precision(config),
-    )
-    transformer_params,text_encoder_params = convert_f5_torch_to_nnx(config.pretrained_model_name_or_path)
+    def create_model(rngs: nnx.Rngs, config: dict):
+        f5_transformer = F5Transformer2DModel(
+            text_dim=config.text_dim, # Make sure text_dim is in config
+            mel_dim=config.mel_dim, # Make sure mel_dim is in config
+            dim=config.latent_dim, # Make sure latent_dim is in config
+            head_dim=config.head_dim,
+            num_depth=config.num_depth,
+            num_heads=config.num_heads,
+            mesh=mesh,
+            attention_kernel=config.attention,
+            flash_block_sizes=flash_block_sizes,
+            dtype=config.activations_dtype,
+            weights_dtype=config.weights_dtype,
+            precision=get_precision(config),
+            rngs=rngs,
+        )
+        return f5_transformer
+    p_model_factory = functools.partial(create_model, config=config)
+    wan_transformer = nnx.eval_shape(p_model_factory, rngs=rngs)
+    graphdef, state, rest_of_state = nnx.split(wan_transformer, nnx.Param, ...)
+
+    # 3. retrieve the state shardings, mapping logical names to mesh axis names.
+    logical_state_spec = nnx.get_partition_spec(state)
+    logical_state_sharding = nn.logical_to_mesh_sharding(logical_state_spec, mesh, config.logical_axis_rules)
+    logical_state_sharding = dict(nnx.to_flat_state(logical_state_sharding))
+    params = state.to_pure_dict()
+    state = dict(nnx.to_flat_state(state))
+    tensors = {}
+    with safe_open("/home/fbs/jax-test/aurora_f5_transformer.safetensors", framework="pt") as f:
+        for k in f.keys():
+            tensors[k] = torch2jax(f.get_tensor(k))
+    flax_state_dict = {}
+    cpu = jax.local_devices(backend="cpu")[0]
+    flattened_dict = flatten_dict(params)
+    random_flax_state_dict = {}
+    for key in flattened_dict:
+      string_tuple = tuple([str(item) for item in key])
+      random_flax_state_dict[string_tuple] = flattened_dict[key]
+    del flattened_dict
+    for pt_key, tensor in tensors.items():
+      renamed_pt_key = rename_key(pt_key)
+      renamed_pt_key = renamed_pt_key.replace("transformer_blocks.", "blocks.")
+      renamed_pt_key = renamed_pt_key.replace(".scale_shift_table", ".adaln_scale_shift_table")
+      renamed_pt_key = renamed_pt_key.replace("to_out_0", "proj_attn")
+      renamed_pt_key = renamed_pt_key.replace("ffn.net_2", "ffn.proj_out")
+      renamed_pt_key = renamed_pt_key.replace("ffn.net_0", "ffn.act_fn")
+      renamed_pt_key = renamed_pt_key.replace("norm2", "norm2.layer_norm")
+      pt_tuple_key = tuple(renamed_pt_key.split("."))
+
+    #   if "blocks" in pt_tuple_key:
+    #     new_key = ("blocks",) + pt_tuple_key[2:]
+    #     block_index = int(pt_tuple_key[1])
+    #     pt_tuple_key = new_key
+    #   flax_key, flax_tensor = rename_key_and_reshape_tensor(
+    #       pt_tuple_key, tensor, random_flax_state_dict, model_type=WAN_MODEL
+    #   )
+    #   flax_key = rename_for_nnx(flax_key)
+    #   flax_key = _tuple_str_to_int(flax_key)
+
+    #   if "blocks" in flax_key:
+    #     if flax_key in flax_state_dict:
+    #       new_tensor = flax_state_dict[flax_key]
+    #     else:
+    #       new_tensor = jnp.zeros((num_layers,) + flax_tensor.shape)
+    #     flax_tensor = new_tensor.at[block_index].set(flax_tensor)
+    #   flax_state_dict[flax_key] = jax.device_put(jnp.asarray(flax_tensor), device=cpu)
+    # validate_flax_state_dict(eval_shapes, flax_state_dict)
+    flax_state_dict = unflatten_dict(flax_state_dict)
+    del tensors
+    jax.clear_caches()
+
+
+
+    #transformer_params = convert_f5_transformer_torch_to_nnx(config.pretrained_model_name_or_path)
     # weights_init_fn = functools.partial(transformer.init_weights, rngs=rng, max_sequence_length=config.max_sequence_length, eval_only=False)
     # transformer_state, transformer_state_shardings = setup_initial_state(
     #     model=transformer,
@@ -138,7 +240,7 @@ def run(config):
     #     training=False,
     # )
     #transformer_state = transformer_state.replace(params=transformer_params)
-    transformer_state = jax.device_put(transformer_state, transformer_state_shardings)
+    #transformer_state = jax.device_put(transformer_state, transformer_state_shardings)
     get_memory_allocations()
     num_devices = len(jax.devices())
     data_sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
