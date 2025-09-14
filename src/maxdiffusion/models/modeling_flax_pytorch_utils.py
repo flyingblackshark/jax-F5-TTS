@@ -112,12 +112,12 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dic
           if isinstance(random_flax_state_dict[renamed_pt_tuple_key], Partitioned):
             # Wan 2.1 uses nnx.scan and nnx.vmap which stacks layer weights which will cause a shape mismatch
             # from the original weights which are not stacked.
-            if model_type is not None and model_type == common_types.WAN_MODEL:
+            if model_type is not None and (model_type in (common_types.WAN_MODEL,common_types.F5_MODEL)):
               pass
             else:
               assert random_flax_state_dict[renamed_pt_tuple_key].value.shape == pt_tensor.T.shape
           else:
-            if model_type is not None and model_type == common_types.WAN_MODEL:
+            if model_type is not None and (model_type in (common_types.WAN_MODEL,common_types.F5_MODEL)):
               pass
             else:
               assert random_flax_state_dict[renamed_pt_tuple_key].shape == pt_tensor.T.shape

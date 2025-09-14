@@ -45,3 +45,4 @@ KEEP_2 = "activation_keep_2"
 CONV_OUT = "activation_conv_out_channels"
 
 WAN_MODEL = "Wan2.1"
+F5_MODEL = "F5v1"
