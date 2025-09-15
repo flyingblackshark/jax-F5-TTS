@@ -299,14 +299,14 @@ class GRN(nnx.Module):
 class ConvNeXtV2Block(nnx.Module):
     def __init__(
         self,
+        rngs: nnx.Rngs,
         dim: int,
         intermediate_dim: int,
         dilation: int = 1,
         dtype: jnp.dtype = jnp.float32,
         weights_dtype: jnp.dtype = jnp.float32,
         precision: jax.lax.Precision = None,
-        *,
-        rngs: nnx.Rngs
+        
     ):
         self.dim = dim
         self.intermediate_dim = intermediate_dim

@@ -198,12 +198,12 @@ def run(config):
     flash_block_sizes = get_flash_block_sizes(config)
     def get_f5_text_encoder():
         def create_model(rngs: nnx.Rngs, config: dict):
-            f5_text_encoder = F5TextEmbedding(text_num_embeds=2545, text_dim=512, conv_layers=4)
-            return f5_transformer
+            f5_text_encoder = F5TextEmbedding(rngs=rngs,text_num_embeds=2545, text_dim=512, conv_layers=4)
+            return f5_text_encoder
 
         p_model_factory = functools.partial(create_model, config=config)
-        f5_transformer = nnx.eval_shape(p_model_factory, rngs=rngs)
-        graphdef, state, rest_of_state = nnx.split(f5_transformer, nnx.Param, ...)
+        f5_text_encoder = nnx.eval_shape(p_model_factory, rngs=rngs)
+        graphdef, state, rest_of_state = nnx.split(f5_text_encoder, nnx.Param, ...)
 
         # 3. retrieve the state shardings, mapping logical names to mesh axis names.
         logical_state_spec = nnx.get_partition_spec(state)
@@ -215,7 +215,7 @@ def run(config):
         state = dict(nnx.to_flat_state(state))
         tensors = {}
         with safe_open(
-            "/home/fbs/jax-test/aurora_f5_transformer.safetensors", framework="pt"
+            "/home/fbs/jax-test/aurora_f5_text_encoder.safetensors", framework="pt"
         ) as f:
             for k in f.keys():
                 tensors[k] = torch2jax(f.get_tensor(k))
@@ -229,9 +229,9 @@ def run(config):
         del flattened_dict
         for pt_key, tensor in tensors.items():
             renamed_pt_key = rename_key(pt_key)
-            renamed_pt_key = renamed_pt_key.replace("transformer.", "")
+            renamed_pt_key = renamed_pt_key.replace("transformer.text_embed.", "")
             renamed_pt_key = renamed_pt_key.replace(
-                "transformer_blocks_", "transformer_blocks."
+                "text_blocks_", "text_blocks."
             )
             renamed_pt_key = renamed_pt_key.replace("conv1d_", "conv1d.layers.0.")
             renamed_pt_key = renamed_pt_key.replace("time_mlp_", "time_mlp.layers.0.")
@@ -242,22 +242,12 @@ def run(config):
             # renamed_pt_key = renamed_pt_key.replace("norm2", "norm2.layer_norm")
             pt_tuple_key = tuple(renamed_pt_key.split("."))
 
-            if "transformer_blocks" in pt_tuple_key:
-                new_key = ("transformer_blocks",) + pt_tuple_key[2:]
-                block_index = int(pt_tuple_key[1])
-                pt_tuple_key = new_key
             flax_key, flax_tensor = rename_key_and_reshape_tensor(
                 pt_tuple_key, tensor, random_flax_state_dict,model_type=F5_MODEL
             )
             flax_key = rename_for_nnx(flax_key)
             flax_key = _tuple_str_to_int(flax_key)
 
-            if "transformer_blocks" in flax_key:
-                if flax_key in flax_state_dict:
-                    new_tensor = flax_state_dict[flax_key]
-                else:
-                    new_tensor = jnp.zeros((config.num_depth,) + flax_tensor.shape)
-                flax_tensor = new_tensor.at[block_index].set(flax_tensor)
             flax_state_dict[flax_key] = jax.device_put(jnp.asarray(flax_tensor), device=cpu)
         # validate_flax_state_dict(eval_shapes, flax_state_dict)
         flax_state_dict = unflatten_dict(flax_state_dict)
@@ -377,6 +367,7 @@ def run(config):
     # )
     # transformer_state = transformer_state.replace(params=transformer_params)
     # transformer_state = jax.device_put(transformer_state, transformer_state_shardings)
+    f5_text_encoder = get_f5_text_encoder()
     f5_transformer = get_f5_transformer()
     get_memory_allocations()
     num_devices = len(jax.devices())
