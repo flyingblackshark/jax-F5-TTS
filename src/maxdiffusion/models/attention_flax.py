@@ -177,6 +177,7 @@ def _tpu_flash_attention(
     query: jax.Array,
     key: jax.Array,
     value: jax.Array,
+    decoder_segment_ids: jax.Array,
     heads: int,
     mesh: Mesh,
     axis_names_q: AxisNames,
@@ -217,12 +218,15 @@ def _tpu_flash_attention(
     @functools.partial(
         shard_map.shard_map,
         mesh=mesh,
-        in_specs=(q_axis_names, kv_axis_names, kv_axis_names),
+        in_specs=(q_axis_names, kv_axis_names, kv_axis_names,None),
         out_specs=q_axis_names,
         check_rep=False,
     )
-    def wrap_flash_attention(query, key, value):
-
+    def wrap_flash_attention(query,
+                                key,
+                                value,
+                                decoder_segment_ids,):
+        real_lens = jnp.sum((decoder_segment_ids>0).astype(jnp.int32),axis=-1).astype(jnp.bool)
         query, kv_size, query_seq_len = _pad_data_for_flash(
             query, heads, block_sizes.block_q
         )
@@ -236,14 +240,16 @@ def _tpu_flash_attention(
 
         q_padded_len = query.shape[2]
         q_indices = jax.lax.broadcasted_iota(jnp.int32, (q_padded_len,), 0)
-        q_segment_ids = (q_indices < query_seq_len).astype(jnp.int32)
+        q_segment_ids = jnp.logical_and((q_indices < query_seq_len),(q_indices < real_lens)).astype(jnp.int32)
 
         kv_padded_len = key.shape[2]
         kv_indices = jax.lax.broadcasted_iota(jnp.int32, (kv_padded_len,), 0)
         kv_segment_ids = (kv_indices < key_seq_len).astype(jnp.int32)
+        
         segment_ids = splash_attention_kernel.SegmentIds(
             q=q_segment_ids, kv=kv_segment_ids
         )
+
 
         # make_splash_mha is wrapped around shardmap and seq and head is already
         # sharded based on in_specs, therefore setting head_shards=1 and q_seq_shards=1.
@@ -310,7 +316,7 @@ def _tpu_flash_attention(
             "Warning, batch dimension should be shardable among the devices in data and fsdp"
             f" axis, batch dimension: {query.shape[0]}, devices_in_data_fsdp: {devices_in_data_fsdp}"
         )
-    x = wrap_flash_attention(query, key, value)
+    x = wrap_flash_attention(query, key, value,decoder_segment_ids)
     x = _reshape_heads_to_head_dim(x)
 
     return x
@@ -320,6 +326,7 @@ def _apply_attention_dot(
     query: Array,
     key: Array,
     value: Array,
+    decoder_segment_ids:Array,
     dtype: jnp.dtype,
     heads: int,
     dim_head: int,
@@ -381,6 +388,16 @@ def _apply_attention_dot(
             )
 
         attention_scores = attention_scores * scale
+        
+        if decoder_segment_ids is not None:
+            # 假设 seq_len_query == seq_len_key == seq_len
+            mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]  # (batch_size, seq_len, seq_len)
+            if split_head_dim:
+                mask = mask[:, None, :, :]  # (batch_size, 1, seq_len, seq_len)
+            else:
+                mask = jnp.repeat(mask, heads, axis=0)  # (batch_size * heads, seq_len, seq_len)
+            attention_scores = jnp.where(mask, attention_scores, -1e9)
+
         attention_probs = nn.softmax(attention_scores, axis=-1 if split_head_dim else 2)
 
         attention_probs = attention_probs.astype(dtype)
@@ -439,6 +456,7 @@ def _apply_attention(
     query: Array,
     key: Array,
     value: Array,
+    decoder_segment_ids:Array,
     heads: int,
     dim_head: int,
     split_head_dim: bool,
@@ -476,6 +494,7 @@ def _apply_attention(
             query,
             key,
             value,
+            decoder_segment_ids,
             dtype,
             heads,
             dim_head,
@@ -489,6 +508,7 @@ def _apply_attention(
             query,
             key * scale,
             value,
+            decoder_segment_ids,
             heads,
             mesh,
             axis_names_q,
@@ -496,19 +516,19 @@ def _apply_attention(
             flash_block_sizes,
             dtype,
         )
-    elif attention_kernel == "ring":
-        return _tpu_flash_attention(
-            query,
-            key * scale,
-            value,
-            heads,
-            mesh,
-            axis_names_q,
-            axis_names_kv,
-            flash_block_sizes,
-            dtype,
-            attention_kernel,
-        )
+    # elif attention_kernel == "ring":
+    #     return _tpu_flash_attention(
+    #         query,
+    #         key * scale,
+    #         value,
+    #         heads,
+    #         mesh,
+    #         axis_names_q,
+    #         axis_names_kv,
+    #         flash_block_sizes,
+    #         dtype,
+    #         attention_kernel,
+    #     )
     elif attention_kernel == "cudnn_flash_te":
         return _cudnn_flash_attention(query, key, value, heads, mesh, dpa_layer)
     else:
@@ -685,11 +705,12 @@ class NNXAttentionOp(nnx.Module):
         self.dtype = dtype
         self.quant = quant
 
-    def apply_attention(self, query: Array, key: Array, value: Array):
+    def apply_attention(self, query: Array, key: Array, value: Array,decoder_segment_ids:Array):
         return _apply_attention(
             query=query,
             key=key,
             value=value,
+            decoder_segment_ids=decoder_segment_ids,
             heads=self.heads,
             dim_head=self.dim_head,
             split_head_dim=self.split_head_dim,
@@ -1861,7 +1882,7 @@ class FlaxF5Attention(nnx.Module):
                 ("heads",),
             ),
         )
-        self.drop_out = nnx.Dropout(dropout)
+        self.dropout_layer = nnx.Dropout(dropout)
 
     def rotate_half(self, x):
         x = rearrange(x, "... (d r) -> ... d r", r=2)

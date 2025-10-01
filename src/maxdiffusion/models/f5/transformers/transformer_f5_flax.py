@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-
+import numpy as np
 from typing import Optional, Tuple
 import jax
 import math
@@ -100,7 +100,7 @@ class F5TransformerBlock(nnx.Module):
             rngs=rngs,
         )
         self.ff = nnx.Sequential(
-            [
+            
                 nnx.Linear(
                     in_features=dim,
                     out_features=int(dim * mlp_ratio),
@@ -128,7 +128,7 @@ class F5TransformerBlock(nnx.Module):
                     precision=precision,
                     rngs=rngs,
                 ),
-            ]
+            
         )
 
         # let chunk size default to None
@@ -153,7 +153,7 @@ class F5TransformerBlock(nnx.Module):
             hidden_states=norm_hidden_states,
             rope=image_rotary_emb,
             decoder_segment_ids=decoder_segment_ids,
-            rmgs=rngs,
+            rngs=rngs,
         )
 
         x = x + gate_msa * attn_output
@@ -169,18 +169,15 @@ class ConvPositionEmbedding(nnx.Module):
 
     def __init__(
         self,
+        rngs: nnx.Rngs,
         dim: int,
         kernel_size: int = 31,
         groups: int = 16,
         dtype: jnp.dtype = jnp.float32,
         weights_dtype: jnp.dtype = jnp.float32,
-        precision: jax.lax.Precision = None,
-        *,
-        rngs: nnx.Rngs
+        precision: jax.lax.Precision = None,  
     ):
-        self.conv1d = nnx.Sequential(
-            [
-                nnx.Conv(
+        self.conv1 = nnx.Conv(
                     in_features=dim,
                     out_features=dim,
                     kernel_size=(kernel_size,),
@@ -190,9 +187,8 @@ class ConvPositionEmbedding(nnx.Module):
                     param_dtype=weights_dtype,
                     precision=precision,
                     rngs=rngs,
-                ),
-                jax.nn.mish,
-                nnx.Conv(
+                )
+        self.conv2 = nnx.Conv(
                     in_features=dim,
                     out_features=dim,
                     kernel_size=(kernel_size,),
@@ -202,10 +198,8 @@ class ConvPositionEmbedding(nnx.Module):
                     param_dtype=weights_dtype,
                     precision=precision,
                     rngs=rngs,
-                ),
-                jax.nn.mish,
-            ]
-        )
+                )
+        
 
     def __call__(self, x, mask=None):
         # 如果提供了 mask，则将 mask 扩展一个维度，并将对应位置置 0
@@ -213,7 +207,14 @@ class ConvPositionEmbedding(nnx.Module):
             mask_expanded = jnp.expand_dims(mask, axis=-1)  # (b, n, 1)
             x = jnp.where(mask_expanded, x, 0.0)
 
-        x = self.conv1d(x)
+        x = self.conv1(x)
+        x = jax.nn.mish(x)
+
+        if mask is not None:
+            x = jnp.where(mask_expanded, x, 0.0)
+
+        x = self.conv2(x)
+        x = jax.nn.mish(x)
 
         if mask is not None:
             x = jnp.where(mask_expanded, x, 0.0)
@@ -286,14 +287,14 @@ class GRN(nnx.Module):
         self.dim = dim
         # Initialize parameters gamma and beta with shape (1, 1, dim)
         self.gamma = nnx.Param(jnp.zeros((1, 1, dim)))
-        self.beta = nnx.Param(jnp.zeros((1, 1, dim)))
+        self.bias = nnx.Param(jnp.zeros((1, 1, dim)))
 
     def __call__(self, x):
         # Compute L2 norm over the sequence dimension (axis=1) with keepdims
         Gx = jnp.linalg.norm(x, ord=2, axis=1, keepdims=True)
         # Normalize: divide by mean across the feature dimension (axis=-1)
         Nx = Gx / (jnp.mean(Gx, axis=-1, keepdims=True) + 1e-6)
-        return self.gamma.value * (x * Nx) + self.beta.value + x
+        return self.gamma.value * (x * Nx) + self.bias.value + x
 
 
 class ConvNeXtV2Block(nnx.Module):
@@ -320,7 +321,7 @@ class ConvNeXtV2Block(nnx.Module):
         padding = (dilation * (7 - 1)) // 2
 
         # Depthwise convolution: we use feature_group_count=dim to apply a separate kernel per channel.
-        self.conv = nnx.Conv(
+        self.dwconv = nnx.Conv(
             in_features=dim,
             out_features=dim,
             kernel_size=(7,),
@@ -344,7 +345,7 @@ class ConvNeXtV2Block(nnx.Module):
         )
 
         # First pointwise (dense) layer
-        self.dense1 = nnx.Linear(
+        self.pwconv1 = nnx.Linear(
             in_features=dim,
             out_features=intermediate_dim,
             dtype=dtype,
@@ -357,7 +358,7 @@ class ConvNeXtV2Block(nnx.Module):
         self.grn = GRN(dim=intermediate_dim, rngs=rngs)
 
         # Second pointwise (dense) layer
-        self.dense2 = nnx.Linear(
+        self.pwconv2 = nnx.Linear(
             in_features=intermediate_dim,
             out_features=dim,
             dtype=dtype,
@@ -368,29 +369,27 @@ class ConvNeXtV2Block(nnx.Module):
 
     def __call__(self, x):
         residual = x
-        x = self.conv(x)
+        x = self.dwconv(x)
         x = self.layer_norm(x)
-        x = self.dense1(x)
+        x = self.pwconv1(x)
         x = nnx.gelu(x)
         x = self.grn(x)
-        x = self.dense2(x)
+        x = self.pwconv2(x)
         return residual + x
 
 
 def get_pos_embed_indices(
     start,
-    # length,
-    max_pos,
+    length,
+    #max_pos,
     scale=1.0,
 ):
     # Create a scale tensor of the same shape as start.
     scale = scale * jnp.ones_like(start, dtype=jnp.float32)
     # Compute positions: add an unsqueezed start to the broadcasted arange scaled appropriately.
-    pos = start[:, None] + (
-        jnp.arange(max_pos, dtype=jnp.float32)[None, :] * scale[:, None]
-    ).astype(jnp.int32)
+    pos = start[:, None] + (jnp.arange(length, dtype=jnp.float32)[None, :] * scale[:, None]).astype(jnp.int32)
     # Ensure positions are less than max_pos; otherwise, use max_pos - 1.
-    pos = jnp.where(pos < max_pos, pos, max_pos - 1)
+    #pos = jnp.where(pos < max_pos, pos, max_pos - 1)
     return pos.astype(jnp.int32)
 
 
@@ -453,7 +452,7 @@ class F5TextEmbedding(nnx.Module):
 
         if conv_layers > 0:
             self.extra_modeling = True
-            self.freqs_cis = precompute_freqs_cis(text_dim, precompute_max_pos)
+            #self.freqs_cis = precompute_freqs_cis(text_dim, precompute_max_pos)
             self.text_blocks = [
                 ConvNeXtV2Block(
                     dim=text_dim,
@@ -471,7 +470,7 @@ class F5TextEmbedding(nnx.Module):
     def __call__(
         self,
         text,
-        # seq_len,
+        #seq_len,
         text_decoder_segment_ids,
     ):  # noqa: F722
 
@@ -481,14 +480,13 @@ class F5TextEmbedding(nnx.Module):
         # possible extra modeling
         if self.extra_modeling:
             # sinus pos emb
-            batch_start = jnp.zeros((batch,))
-            pos_idx = get_pos_embed_indices(
-                batch_start,
-                # seq_len,
-                max_pos=self.precompute_max_pos,
-            )
-            text_pos_embed = self.freqs_cis[pos_idx]
-            text = text + text_pos_embed
+            #batch_start = jnp.zeros((batch,))
+            # pos_idx = get_pos_embed_indices(
+            #     batch_start,
+            #     seq_len
+            # )
+            #text_pos_embed = self.freqs_cis
+            text = text + precompute_freqs_cis(self.text_dim, text_len)
 
             # convnextv2 blocks
             text = text * text_decoder_segment_ids[..., jnp.newaxis]
@@ -548,7 +546,7 @@ class TimestepEmbedding(nnx.Module):
         self.time_embed = SinusPositionEmbedding(dim=freq_embed_dim)
         # 定义 MLP，两层全连接，中间用 SiLU 激活函数
         self.time_mlp = nnx.Sequential(
-            [
+            
                 nnx.Linear(
                     in_features=freq_embed_dim,
                     out_features=dim,
@@ -566,7 +564,7 @@ class TimestepEmbedding(nnx.Module):
                     precision=precision,
                     rngs=rngs,
                 ),
-            ]
+            
         )
 
     def __call__(self, timestep):
@@ -598,9 +596,7 @@ class RotaryEmbedding(nnx.Module):
 
         base = base * (base_rescale_factor ** (dim / (dim - 2)))
 
-        self.inv_freq = 1.0 / (
-            base ** (jnp.arange(0, dim, 2).astype(jnp.float32) / dim)
-        )
+
 
         assert interpolation_factor >= 1.0
 
@@ -617,9 +613,11 @@ class RotaryEmbedding(nnx.Module):
 
         if t.ndim == 1:
             t = jnp.expand_dims(t, axis=0)
-
+        inv_freq = 1.0 / (
+            self.base ** (jnp.arange(0, self.dim, 2).astype(jnp.float32) / self.dim)
+        )
         freqs = (
-            jnp.einsum("b i , j -> b i j", t.astype(jnp.float32), self.inv_freq)
+            jnp.einsum("b i , j -> b i j", t.astype(jnp.float32), inv_freq)
             / self.interpolation_factor
         )
         freqs_complex = jnp.stack([freqs, freqs], axis=-1)

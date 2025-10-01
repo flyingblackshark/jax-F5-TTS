@@ -43,12 +43,13 @@ class AdaLayerNormContinuous(nnx.Module):
         self.weights_dtype = weights_dtype
         self.precision = precision
 
-        self.dense = nnx.Linear(
+        self.linear = nnx.Linear(
             in_features=embedding_dim,
             out_features=embedding_dim * 2,
             use_bias=bias,
             dtype=dtype,
             param_dtype=weights_dtype,
+            precision=self.precision,
             kernel_init=nnx.initializers.lecun_normal(),
             bias_init=nnx.initializers.zeros,
             rngs=rngs,
@@ -67,14 +68,8 @@ class AdaLayerNormContinuous(nnx.Module):
     def __call__(self, x, conditioning_embedding):
         assert self.norm_type == "layer_norm"
         emb = jax.nn.silu(conditioning_embedding)
-        emb = self.dense(emb, precision=self.precision)
+        emb = self.linear(emb)
         scale, shift = jnp.split(emb, 2, axis=-1)
-        shift = jax.lax.with_sharding_constraint(
-            shift, PartitionSpec("activation_batch", "activation_embed")
-        )
-        scale = jax.lax.with_sharding_constraint(
-            scale, PartitionSpec("activation_batch", "activation_embed")
-        )
         x = self.layer_norm(x)
         x = (1 + scale[:, None, :]) * x + shift[:, None, :]
         return x
@@ -107,7 +102,7 @@ class AdaLayerNormZero(nnx.Module):
         self.weights_dtype = weights_dtype
         self.precision = precision
 
-        self.dense = nnx.Linear(
+        self.linear = nnx.Linear(
             in_features=embedding_dim,
             out_features=6 * embedding_dim,
             use_bias=bias,
@@ -115,6 +110,7 @@ class AdaLayerNormZero(nnx.Module):
             param_dtype=weights_dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             bias_init=nnx.initializers.zeros,
+            precision=self.precision,
             rngs=rngs,
         )
 
@@ -130,27 +126,9 @@ class AdaLayerNormZero(nnx.Module):
 
     def __call__(self, x, emb):
         emb = jax.nn.silu(emb)
-        emb = self.dense(emb, precision=self.precision)
+        emb = self.linear(emb)
         (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp) = jnp.split(
             emb[:, None, :], 6, axis=-1
-        )
-        shift_msa = jax.lax.with_sharding_constraint(
-            shift_msa, PartitionSpec("activation_batch", "activation_embed")
-        )
-        scale_msa = jax.lax.with_sharding_constraint(
-            scale_msa, PartitionSpec("activation_batch", "activation_embed")
-        )
-        gate_msa = jax.lax.with_sharding_constraint(
-            gate_msa, PartitionSpec("activation_batch", "activation_embed")
-        )
-        shift_mlp = jax.lax.with_sharding_constraint(
-            shift_mlp, PartitionSpec("activation_batch", "activation_embed")
-        )
-        scale_mlp = jax.lax.with_sharding_constraint(
-            scale_mlp, PartitionSpec("activation_batch", "activation_embed")
-        )
-        gate_mlp = jax.lax.with_sharding_constraint(
-            gate_mlp, PartitionSpec("activation_batch", "activation_embed")
         )
 
         if self.norm_type == "layer_norm":

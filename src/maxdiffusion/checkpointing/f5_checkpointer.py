@@ -15,37 +15,21 @@
  """
 
 from abc import ABC
-from contextlib import nullcontext
-import functools
 import json
+
 import jax
-from jax.sharding import Mesh
+import numpy as np
+from maxdiffusion.checkpointing.checkpointing_utils import (create_orbax_checkpoint_manager)
+
+from .. import max_logging, max_utils
 import orbax.checkpoint as ocp
-import grain.python as grain
-from maxdiffusion import (
-    max_utils,
-    FlaxAutoencoderKL,
-    max_logging,
-)
-from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5Transformer2DModel,F5TextEmbedding
+from etils import epath
+
 from ..pipelines.f5.f5_pipeline import F5Pipeline
 
-#from transformers import (CLIPTokenizer, FlaxCLIPTextModel, FlaxT5EncoderModel, AutoTokenizer)
 
-from maxdiffusion.checkpointing.checkpointing_utils import (create_orbax_checkpoint_manager)
-#from maxdiffusion.models.f5.util import load_flow_model
 
 F5_CHECKPOINT = "F5_CHECKPOINT"
-_CHECKPOINT_FORMAT_ORBAX = "CHECKPOINT_FORMAT_ORBAX"
-
-F5_STATE_KEY = "f5_state"
-F5_TRANSFORMER_PARAMS_KEY = "f5_transformer_params"
-F5_STATE_SHARDINGS_KEY = "f5_state_shardings"
-F5_TEXT_ENCODER_KEY = "f5_text_encoder"
-#F5_VAE_PARAMS_KEY = "F5_vae"
-#VAE_STATE_KEY = "vae_state"
-#VAE_STATE_SHARDINGS_KEY = "vae_state_shardings"
-
 
 class F5Checkpointer(ABC):
 
