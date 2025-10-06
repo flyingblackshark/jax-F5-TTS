@@ -51,14 +51,9 @@ import librosa
 from maxdiffusion.utils.seq_utils import lens_to_mask
 from flax import nnx
 import flax.linen as nn
-from maxdiffusion.models.modeling_flax_pytorch_utils import (
-    rename_key,
-    rename_key_and_reshape_tensor,
-    torch2jax,
-    validate_flax_state_dict,
-)
-from flax.traverse_util import unflatten_dict, flatten_dict
 import flax
+import jax_vocos
+
 
 cfg_strength = 2
 
@@ -266,9 +261,10 @@ def run(config):
 
     final_text_list_pinyin = convert_char_to_pinyin(batched_text_list)
     global_max_sequence_length = config.max_sequence_length
-    text_ids_unpadded = list_str_to_idx(final_text_list_pinyin, global_vocab_char_map, max_length=global_max_sequence_length)
+    text_ids_unpadded,text_ids_mask = list_str_to_idx(final_text_list_pinyin, global_vocab_char_map, max_length=global_max_sequence_length)
     padded_batch_size = batch_size - len(gen_text_batches)
     text_ids = np.pad(text_ids_unpadded, ((0, padded_batch_size), (0, 0)))
+    text_ids_mask = np.pad(text_ids_mask, ((0, padded_batch_size), (0, 0)))
 
     ref_audio = np.pad(ref_audio, (0, ref_max_length - 256 - ref_audio.shape[0]))
 
@@ -279,9 +275,9 @@ def run(config):
     lens = np.full((batch_size,), ref_audio_len)
     duration = np.asarray(batched_duration)
     duration = np.pad(duration, (0, padded_batch_size))
-    duration = np.maximum(
-        np.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
-    )
+    # duration = np.maximum(
+    #     np.maximum((text_ids != 0).sum(axis=-1), lens) + 1, duration
+    # )
 
     cond_mask = lens_to_mask(lens, length=config.max_sequence_length)
     mask = lens_to_mask(duration, length=config.max_sequence_length)
@@ -298,7 +294,7 @@ def run(config):
         constant_values=0,
     )
 
-    text_decoder_segment_ids = (text_ids != 0).astype(np.int32)
+    text_decoder_segment_ids = text_ids_mask.astype(np.int32)
     decoder_segment_ids = mask.astype(np.int32)
 
     step_cond = np.where(cond_mask[..., np.newaxis], cond, np.zeros_like(cond))
@@ -356,15 +352,15 @@ def run(config):
                                   rest_of_state=rest_of_state)
     out = y_final
     out = jnp.where(cond_mask[..., jnp.newaxis], cond, out)
-    from jax_vocos import load_model
+    # from jax_vocos import load_model
 
-    vocos_model, vocos_params = load_model()
-    rng = {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(0)}
-
+    # vocos_model, vocos_params = load_model()
+    vocos_vocoder = jax_vocos.load_model(load_path="/home/fbs/jax-test/vocos.safetensors")
     out = jax.device_put(out, data_sharding)
-    res = jax.jit(vocos_model.apply, out_shardings=None)(
-        {"params": vocos_params}, out, rngs=rng
-    )
+    # res = jax.jit(vocos_model.apply, out_shardings=None)(
+    #     {"params": vocos_params}, out, rngs=rng
+    # )
+    res = vocos_vocoder(out)
 
     import soundfile as sf
 

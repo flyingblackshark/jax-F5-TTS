@@ -4,7 +4,7 @@ import os
 from importlib.resources import files
 import re
 import numpy as np
-from typing import Optional, Union
+from typing import Optional, Union,Tuple,List,Dict
 def convert_char_to_pinyin(text_list, polyphone=True):
     if jieba.dt.initialized is False:
         jieba.default_logger.setLevel(50)  # CRITICAL
@@ -110,35 +110,70 @@ def chunk_text(text, max_chars=135):
     return chunks
 
 def list_str_to_idx(
-    text: list[list[str]], # Expects list of lists of chars/pinyin
-    vocab_char_map: dict[str, int],
+    text: List[List[str]],
+    vocab_char_map: Dict[str, int],
     max_length: int,
-    padding_value=0, # Use 0 for padding index (which maps to space or unknown)
-):
-    outs = []
-    #unk_idx = vocab_char_map.get('<unk>', vocab_char_map.get(' ', 0)) # Use space if <unk> not present
+    padding_value: int = 0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Converts a list of string lists (sequences) to padded NumPy arrays of indices and generates an attention mask.
+
+    Args:
+        text (List[List[str]]): A list of sequences, where each sequence is a list of characters or tokens.
+        vocab_char_map (Dict[str, int]): A dictionary mapping characters/tokens to integer indices.
+        max_length (int): The maximum length to pad/truncate sequences to.
+        padding_value (int, optional): The index value to use for padding. Defaults to 0.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: A tuple containing:
+            - A 2D NumPy array of token IDs, with shape (batch_size, max_length).
+            - A 2D NumPy array (attention mask), with shape (batch_size, max_length).
+              The mask has 1 for real tokens and 0 for padding tokens.
+    """
+    out_ids = []
+    out_masks = []
 
     for t in text:
-        # Map characters/pinyin, using unk_idx for unknown ones
+        # 1. Map characters/pinyin to integer indices
+        # Uses the dictionary's .get() method, defaulting to 0 for unknown characters.
         list_idx_tensors = [vocab_char_map.get(c, 0) for c in t]
         text_ids = np.asarray(list_idx_tensors, dtype=np.int32)
+        text_ids = text_ids + 1 
+        # Keep track of the original length before padding/truncation
+        original_len = text_ids.shape[-1]
 
-        # Add 1 to all indices (making padding 1, original indices shifted)
-        text_ids = text_ids + 1 # Let's reconsider this, maybe padding with 0 is better if space is 0
-
-        # Pad sequence
-        pad_len = max_length - text_ids.shape[-1]
-        if pad_len < 0:
-            print(f"Warning: Truncating text sequence from {text_ids.shape[-1]} to {max_length}")
+        # 2. Handle truncation if the sequence is too long
+        if original_len > max_length:
+            print(f"Warning: Truncating text sequence from {original_len} to {max_length}")
             text_ids = text_ids[:max_length]
-            pad_len = 0
+            seq_len = max_length
+        else:
+            seq_len = original_len
 
-        # Pad with the designated padding_value (e.g., 0)
-        text_ids = np.pad(text_ids, ((0, pad_len)), constant_values=padding_value)
-        outs.append(text_ids)
+        # 3. Create the attention mask (1 for real tokens, 0 for padding)
+        # The mask is based on the length *before* padding.
+        mask = np.ones(seq_len, dtype=np.int32)
 
-    if not outs:
-      return np.array([], dtype=np.int32).reshape(0, max_length)
+        # 4. Calculate padding length and pad both the IDs and the mask
+        pad_len = max_length - seq_len
+        
+        # Pad the sequence IDs with the specified padding_value
+        padded_ids = np.pad(text_ids, (0, pad_len), 'constant', constant_values=padding_value)
+        out_ids.append(padded_ids)
 
-    stacked_text_ids = np.stack(outs)
-    return stacked_text_ids
+        # Pad the mask with 0
+        padded_mask = np.pad(mask, (0, pad_len), 'constant', constant_values=0)
+        out_masks.append(padded_mask)
+
+    # Handle case where the input list is empty
+    if not out_ids:
+        return (
+            np.array([], dtype=np.int32).reshape(0, max_length),
+            np.array([], dtype=np.int32).reshape(0, max_length)
+        )
+
+    # Stack the lists of arrays into 2D NumPy arrays
+    stacked_text_ids = np.stack(out_ids)
+    stacked_mask = np.stack(out_masks)
+
+    return stacked_text_ids, stacked_mask
