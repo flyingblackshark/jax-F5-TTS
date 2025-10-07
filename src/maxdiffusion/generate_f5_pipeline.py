@@ -28,7 +28,7 @@ from maxdiffusion.utils.pinyin_utils import (
     convert_char_to_pinyin,
     list_str_to_idx,
 )
-
+from typing import List, Union, Optional, Tuple, Dict
 jax.config.update("jax_use_shardy_partitioner", True)
 
 def run(config, pipeline=None, filename_prefix=""):

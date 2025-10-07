@@ -368,6 +368,8 @@ class F5Pipeline:
       #prompt_embeds: jax.Array = None,
   ):
     prompt = [prompt] if isinstance(prompt, str) else prompt
+    batch_size = len(prompt)
+    prompt = [u for u in prompt if u is not None]
     prompt = [prompt_clean(u) for u in prompt]
     pinyin_inputs = convert_char_to_pinyin(prompt)
     text_ids,text_ids_mask = list_str_to_idx(pinyin_inputs, self.global_vocab_char_map, max_length=max_sequence_length)
@@ -379,6 +381,8 @@ class F5Pipeline:
         text=jnp.zeros_like(text_ids),
         text_decoder_segment_ids=text_ids_mask.astype(np.int32),
     )
+    text_embed_cond = jnp.pad(text_embed_cond,((0,batch_size-text_embed_cond.shape[0]),(0,0),(0,0)))
+    text_embed_uncond = jnp.pad(text_embed_uncond,((0,batch_size-text_embed_uncond.shape[0]),(0,0),(0,0)))
 
     return text_embed_cond,text_embed_uncond
 
@@ -402,10 +406,12 @@ class F5Pipeline:
         audio_paths = reference_audio
     else:
         raise TypeError(f"Input 'reference_audio' must be a str or List[str], but got {type(reference_audio)}")
+    batch_size = len(reference_audio)
+    reference_audio = [u for u in reference_audio if u is not None]
 
     ref_max_samples = max_sequence_length * 256
-    all_mels = []
     all_lengths = []
+    all_ref_audio = []
 
       # 2. Iterate over each audio path
     for path in audio_paths:
@@ -425,21 +431,22 @@ class F5Pipeline:
         else:
             # Pad if shorter
             ref_audio = np.pad(ref_audio, (0, target_len - ref_audio.shape[0]))
-        
+        all_ref_audio.append(ref_audio)
         # 3. Compute the mel spectrogram for the processed audio
-        cond = get_mel(ref_audio)
-        all_mels.append(cond)
+
+    all_ref_audio = jnp.asarray(all_ref_audio)
+    all_ref_audio = jnp.pad(all_ref_audio,((0,batch_size-all_ref_audio.shape[0]),(0,0)))
+    all_mels = get_mel(all_ref_audio)
 
     # 4. Stack the list of mel spectrograms into a single JAX array (tensor)
     # This creates a new batch dimension at the beginning.
-    stacked_mels = jnp.concatenate(all_mels, axis=0)
-    return stacked_mels, all_lengths
+    # stacked_mels = jnp.concatenate(all_mels, axis=0)
+    return all_mels, all_lengths
   def __call__(
       self,
       prompt: Union[str, List[str]] = None,
       reference_audio : Union[str,List[str]] = "/home/fbs/jax-F5-TTS/test.mp3",
       duration: Union[int,List[int]] = None,
-      guidance_scale: float = 5.0,
       max_sequence_length: int = 512,
   ):
     cond,ref_audio_len = self.get_ref_mel(reference_audio, max_sequence_length)
@@ -482,7 +489,7 @@ class F5Pipeline:
     data_sharding = NamedSharding(self.mesh, P())
     # Using global_batch_size_to_train_on so not to create more config variables
     if self.config.global_batch_size_to_train_on // self.config.per_device_batch_size == 0:
-      data_sharding = jax.sharding.NamedSharding(self.mesh, P(*self.config.data_sharding))
+      data_sharding = NamedSharding(self.mesh, P(*self.config.data_sharding))
 
     text_embed_cond = jax.device_put(text_embed_cond, data_sharding)
     text_embed_uncond = jax.device_put(text_embed_uncond, data_sharding)
