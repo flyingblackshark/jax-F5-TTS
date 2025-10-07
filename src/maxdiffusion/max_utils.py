@@ -26,7 +26,6 @@ import yaml
 import os
 from pathlib import Path
 import subprocess
-
 import numpy as np
 
 import flax
@@ -222,6 +221,10 @@ def walk_and_upload_blobs(config, output_dir):
 
 
 def device_put_replicated(x, sharding):
+  """
+  Although the name indiciates replication, this function can be used
+  to also shard an array based on sharding.
+  """
   return jax.make_array_from_callback(x.shape, sharding, lambda index: x[index])
 
 
@@ -281,9 +284,13 @@ def create_device_mesh(config, devices=None, logging=True):
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
   if multi_slice_env:
     dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
-    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism, devices)
+    mesh = mesh_utils.create_hybrid_device_mesh(
+        ici_parallelism, dcn_parallelism, devices, allow_split_physical_axes=config.allow_split_physical_axes
+    )
   else:
-    mesh = mesh_utils.create_device_mesh(ici_parallelism, devices)
+    mesh = mesh_utils.create_device_mesh(
+        ici_parallelism, devices, allow_split_physical_axes=config.allow_split_physical_axes
+    )
 
   if logging:
     max_logging.log(f"Decided on mesh: {mesh}")
@@ -352,12 +359,11 @@ def get_abstract_state(model, tx, config, mesh, weights_init_fn, training=True):
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
-  unboxed_sharded_abstract_state = unbox_logicallypartioned_trainstate(abstract_sharded_state)
 
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return unboxed_sharded_abstract_state, state_mesh_annotations, state_mesh_shardings
+  return abstract_sharded_state, state_mesh_annotations, state_mesh_shardings
 
 
 def setup_initial_state(
@@ -402,7 +408,10 @@ def setup_initial_state(
           config.enable_single_replica_ckpt_restoring,
       )
       if state:
-        state = state[checkpoint_item]
+        if checkpoint_item == "ltxvid_transformer":
+          state = state
+        else:
+          state = state[checkpoint_item]
     if not state:
       max_logging.log(f"Could not find the item in orbax, creating state...")
       init_train_state_partial = functools.partial(

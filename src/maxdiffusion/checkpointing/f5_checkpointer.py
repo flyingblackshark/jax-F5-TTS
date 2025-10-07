@@ -36,12 +36,6 @@ class F5Checkpointer(ABC):
   def __init__(self, config, checkpoint_type):
     self.config = config
     self.checkpoint_type = checkpoint_type
-    self.checkpoint_format = None
-
-    self.rng = jax.random.PRNGKey(self.config.seed)
-    self.devices_array = max_utils.create_device_mesh(config)
-    self.mesh = Mesh(self.devices_array, self.config.mesh_axes)
-    self.total_train_batch_size = self.config.total_train_batch_size
 
     self.checkpoint_manager = create_orbax_checkpoint_manager(
         self.config.checkpoint_dir,
@@ -58,224 +52,137 @@ class F5Checkpointer(ABC):
     )
     tx = max_utils.create_optimizer(config, learning_rate_scheduler)
     return tx, learning_rate_scheduler
-  def create_text_encoder_state(self, pipeline, params, checkpoint_item_name, is_training):
-    text_encoder = pipeline.text_encoder
 
-    tx = None
-    if is_training:
-      learning_rate = self.config.learning_rate
+  def load_f5_configs_from_orbax(self, step):
+    if step is None:
+      step = self.checkpoint_manager.latest_step()
+      max_logging.log(f"Latest F5 checkpoint step: {step}")
+      if step is None:
+        return None
+    max_logging.log(f"Loading F5 checkpoint from step {step}")
+    metadatas = self.checkpoint_manager.item_metadata(step)
 
-      tx, _ = self._create_optimizer(self.config, learning_rate)
-
-    text_encoder_eval_params = text_encoder.init_weights(
-        rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
+    transformer_metadata = metadatas.f5_state
+    abstract_tree_structure_params = jax.tree_util.tree_map(ocp.utils.to_shape_dtype_struct, transformer_metadata)
+    params_restore = ocp.args.PyTreeRestore(
+        restore_args=jax.tree.map(
+            lambda _: ocp.RestoreArgs(restore_type=np.ndarray),
+            abstract_tree_structure_params,
+        )
     )
-    text_encoder_params = text_encoder_eval_params
-    #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
 
-    weights_init_fn = functools.partial(
-        pipeline.text_encoder.init_weights, rngs=self.rng, max_sequence_length=self.config.max_sequence_length
+    max_logging.log("Restoring F5 checkpoint")
+    restored_checkpoint = self.checkpoint_manager.restore(
+        directory=epath.Path(self.config.checkpoint_dir),
+        step=step,
+        args=ocp.args.Composite(
+            wan_state=params_restore,
+            # wan_state=params_restore_util_way,
+            wan_config=ocp.args.JsonRestore(),
+        ),
     )
-    text_encoder_state, state_mesh_shardings = max_utils.setup_initial_state(
-        model=pipeline.text_encoder,
-        tx=tx,
-        config=self.config,
-        mesh=self.mesh,
-        weights_init_fn=weights_init_fn,
-        model_params=None,
-        checkpoint_manager=self.checkpoint_manager,
-        checkpoint_item=checkpoint_item_name,
-        training=is_training,
-    )
-    if not self.config.train_new_f5:
-      text_encoder_state = text_encoder_state.replace(params=text_encoder_params)
-      text_encoder_state = jax.device_put(text_encoder_state, state_mesh_shardings)
-    return text_encoder_state, state_mesh_shardings
-  
-  def create_f5_state(self, pipeline, params, checkpoint_item_name, is_training):
-    transformer = pipeline.f5
-
-    tx, learning_rate_scheduler = None, None
-    if is_training:
-      learning_rate = self.config.learning_rate
-
-      tx, learning_rate_scheduler = self._create_optimizer(self.config, learning_rate)
-
-    transformer_eval_params = transformer.init_weights(
-        rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
-    )
-    transformer_params = transformer_eval_params
-    #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
-
-    weights_init_fn = functools.partial(
-        pipeline.f5.init_weights, rngs=self.rng, max_sequence_length=self.config.max_sequence_length
-    )
-    f5_state, state_mesh_shardings = max_utils.setup_initial_state(
-        model=pipeline.f5,
-        tx=tx,
-        config=self.config,
-        mesh=self.mesh,
-        weights_init_fn=weights_init_fn,
-        model_params=None,
-        checkpoint_manager=self.checkpoint_manager,
-        checkpoint_item=checkpoint_item_name,
-        training=is_training,
-    )
-    if not self.config.train_new_f5:
-      f5_state = f5_state.replace(params=transformer_params)
-      f5_state = jax.device_put(f5_state, state_mesh_shardings)
-    return f5_state, state_mesh_shardings, learning_rate_scheduler
-  
-  def restore_data_iterator_state(self, data_iterator):
-    if (
-        self.config.dataset_type == "grain"
-        and data_iterator is not None
-        and (self.checkpoint_manager.directory / str(self.checkpoint_manager.latest_step()) / "iter").exists()
-    ):
-      max_logging.log("Restoring data iterator from checkpoint")
-      restored = self.checkpoint_manager.restore(
-          self.checkpoint_manager.latest_step(),
-          args=ocp.args.Composite(iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator)),
-      )
-      data_iterator.local_iterator = restored["iter"]
-    else:
-      max_logging.log("data iterator checkpoint not found")
-    return data_iterator
-
-  def _get_pipeline_class(self):
-    return F5Pipeline
-
-  def _set_checkpoint_format(self, checkpoint_format):
-    self.checkpoint_format = checkpoint_format
-
-  def save_checkpoint(self, train_step, pipeline, train_states):
-    # def config_to_json(model_or_config):
-    #   return json.loads(model_or_config.to_json_string())
-
-    items = {
-        #"f5_config": ocp.args.JsonSave(config_to_json(pipeline.f5)),
-        #"vae_config": ocp.args.JsonSave(config_to_json(pipeline.vae)),
-        #"scheduler_config": ocp.args.JsonSave(config_to_json(pipeline.scheduler)),
-    }
-
-    items[F5_STATE_KEY] = ocp.args.PyTreeSave(train_states[F5_STATE_KEY])
-    items[F5_TEXT_ENCODER_KEY] = ocp.args.PyTreeSave(train_states[F5_TEXT_ENCODER_KEY])
-    #items["scheduler"] = ocp.args.PyTreeSave(train_states["scheduler"])
-
-    self.checkpoint_manager.save(train_step, args=ocp.args.Composite(**items))
-
-  def load_params(self, step=None):
-
-    self.checkpoint_format = _CHECKPOINT_FORMAT_ORBAX
-
-  # def load_f5_configs_from_orbax(self, step):
-  #   max_logging.log("Restoring stable diffusion configs")
-  #   if step is None:
-  #     step = self.checkpoint_manager.latest_step()
-  #     if step is None:
-  #       return None
-
-  #   restore_args = {
-  #       #"f5_config": ocp.args.JsonRestore(),
-  #       #"vae_config": ocp.args.JsonRestore(),
-  #       #"scheduler_config": ocp.args.JsonRestore(),
-  #   }
-
-  #   return (self.checkpoint_manager.restore(step, args=ocp.args.Composite(**restore_args)), None)
+    return restored_checkpoint
 
   # def load_diffusers_checkpoint(self):
-  #   flash_block_sizes = max_utils.get_flash_block_sizes(self.config)
+  #   pipeline = F5Pipeline.from_pretrained(self.config)
+  #   return pipeline
 
-  #   if jax.device_count() == jax.local_device_count():
-  #     context = jax.default_device(jax.devices("cpu")[0])
-  #   else:
-  #     context = nullcontext()
+  def load_checkpoint(self, step=None):
+    restored_checkpoint = self.load_f5_configs_from_orbax(step)
 
-  #   with context:
-  #     # loading from pretrained here causes a crash when trying to compile the model
-  #     # Failed to load HSACO: HIP_ERROR_NoBinaryForGpu
-  #     transformer = F5Transformer2DModel(
-  #         mesh=self.mesh,
-  #         split_head_dim=self.config.split_head_dim,
-  #         attention_kernel=self.config.attention,
-  #         flash_block_sizes=flash_block_sizes,
-  #         dtype=self.config.activations_dtype,
-  #         weights_dtype=self.config.weights_dtype,
-  #         precision=max_utils.get_precision(self.config),
-  #     )
-  #     transformer_eval_params = transformer.init_weights(
-  #         rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
-  #     )
-  #     transformer_params = transformer_eval_params
-
-  #     text_encoder = F5TextEmbedding(
-  #         mesh=self.mesh,
-  #         split_head_dim=self.config.split_head_dim,
-  #         attention_kernel=self.config.attention,
-  #         flash_block_sizes=flash_block_sizes,
-  #         dtype=self.config.activations_dtype,
-  #         weights_dtype=self.config.weights_dtype,
-  #         precision=max_utils.get_precision(self.config),
-  #     )
-  #     text_encoder_eval_params = text_encoder.init_weights(
-  #         rngs=self.rng, max_sequence_length=self.config.max_sequence_length, eval_only=True
-  #     )
-  #     text_encoder_params = text_encoder_eval_params
-  #     #transformer_params = load_flow_model(self.config.F5_name, transformer_eval_params, "cpu")
-
-  #   pipeline = F5Pipeline(
-  #       transformer,
-  #       text_encoder,
-  #       None,
-  #       dtype=self.config.activations_dtype,
-  #       mesh=self.mesh,
-  #       config=self.config,
-  #       rng=self.rng,
-  #   )
-
-  #   params = {F5_TEXT_ENCODER_KEY: text_encoder_params, F5_TRANSFORMER_PARAMS_KEY: transformer_params}
-
-  #   return pipeline, params
-
-  def load_checkpoint(self, step=None, scheduler_class=None):
-    pipeline, params = None, {}
-    if jax.device_count() == jax.local_device_count():
-      context = jax.default_device(jax.devices("cpu")[0])
+    if restored_checkpoint:
+      max_logging.log("Loading F5 pipeline from checkpoint")
+      pipeline = F5Pipeline.from_checkpoint(self.config, restored_checkpoint)
     else:
-      context = nullcontext()
+      max_logging.log("No checkpoint found, loading default pipeline.")
+      pipeline = F5Pipeline.from_checkpoint(self.config, None)
+      #pipeline = self.load_diffusers_checkpoint()
 
-    with context:
-      transformer = F5Transformer2DModel(
-        text_dim=self.config.text_dim, # Make sure text_dim is in config
-        mel_dim=self.config.mel_dim, # Make sure mel_dim is in config
-        dim=self.config.latent_dim, # Make sure latent_dim is in config
-        head_dim=self.config.head_dim,
-        num_depth=self.config.num_depth,
-        num_heads=self.config.num_heads,
+    return pipeline
 
-        mesh=self.mesh,
-        attention_kernel=self.config.attention,
-        flash_block_sizes=self.config.flash_block_sizes,
-        dtype=self.config.activations_dtype,
-        weights_dtype=self.config.weights_dtype,
-        precision=max_utils.get_precision(self.config),
-    )
-    text_encoder = F5TextEmbedding(
-        text_num_embeds=self.config.text_num_embeds,
-        text_dim=self.config.text_dim,
-        conv_layers=self.config.text_conv_layers,
-        conv_mult=self.config.text_conv_mult,
-        dtype=self.config.activations_dtype,
-        weights_dtype=self.config.weights_dtype,
-        precision=max_utils.get_precision(self.config),
-    )
-    pipeline = F5Pipeline(
-        transformer,
-        text_encoder,
-        dtype=self.config.activations_dtype,
-        mesh=self.mesh,
-        config=self.config,
-        rng=self.rng,
-    )
+  def save_checkpoint(self, train_step, pipeline: F5Pipeline, train_states: dict):
+    """Saves the training state and model configurations."""
 
-    return pipeline, params
+    def config_to_json(model_or_config):
+      return json.loads(model_or_config.to_json_string())
+
+    max_logging.log(f"Saving checkpoint for step {train_step}")
+    items = {
+        "f5_config": ocp.args.JsonSave(config_to_json(pipeline.transformer)),
+    }
+
+    items["f5_state"] = ocp.args.PyTreeSave(train_states)
+
+    # Save the checkpoint
+    self.checkpoint_manager.save(train_step, args=ocp.args.Composite(**items))
+    max_logging.log(f"Checkpoint for step {train_step} saved.")
+
+
+def save_checkpoint_orig(self, train_step, pipeline: F5Pipeline, train_states: dict):
+  """Saves the training state and model configurations."""
+
+  def config_to_json(model_or_config):
+    """
+    only save the config that is needed and can be serialized to JSON.
+    """
+    if not hasattr(model_or_config, "config"):
+      return None
+    source_config = dict(model_or_config.config)
+
+    # 1. configs that can be serialized to JSON
+    SAFE_KEYS = [
+        "_class_name",
+        "_diffusers_version",
+        "model_type",
+        "patch_size",
+        "num_attention_heads",
+        "attention_head_dim",
+        "in_channels",
+        "out_channels",
+        "text_dim",
+        "freq_dim",
+        "ffn_dim",
+        "num_layers",
+        "cross_attn_norm",
+        "qk_norm",
+        "eps",
+        "image_dim",
+        "added_kv_proj_dim",
+        "rope_max_seq_len",
+        "pos_embed_seq_len",
+        "flash_min_seq_length",
+        "flash_block_sizes",
+        "attention",
+        "_use_default_values",
+    ]
+
+    # 2. save the config that are in the SAFE_KEYS list
+    clean_config = {}
+    for key in SAFE_KEYS:
+      if key in source_config:
+        clean_config[key] = source_config[key]
+
+    # 3. deal with special data type and precision
+    if "dtype" in source_config and hasattr(source_config["dtype"], "name"):
+      clean_config["dtype"] = source_config["dtype"].name  # e.g 'bfloat16'
+
+    if "weights_dtype" in source_config and hasattr(source_config["weights_dtype"], "name"):
+      clean_config["weights_dtype"] = source_config["weights_dtype"].name
+
+    if "precision" in source_config and isinstance(source_config["precision"]):
+      clean_config["precision"] = source_config["precision"].name  # e.g. 'HIGHEST'
+
+    return clean_config
+
+  items_to_save = {
+      "transformer_config": ocp.args.JsonSave(config_to_json(pipeline.transformer)),
+  }
+
+  items_to_save["transformer_states"] = ocp.args.PyTreeSave(train_states)
+
+  # Create CompositeArgs for Orbax
+  save_args = ocp.args.Composite(**items_to_save)
+
+  # Save the checkpoint
+  self.checkpoint_manager.save(train_step, args=save_args)
+  max_logging.log(f"Checkpoint for step {train_step} saved.")

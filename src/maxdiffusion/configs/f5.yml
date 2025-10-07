@@ -27,7 +27,7 @@ vocoder_model_path: ''
 pretrained_model_name_or_path: ''
 f5_text_encoder_pretrained_model_name_or_path: '/home/fbs/jax-test/aurora_f5_text_encoder.safetensors'
 f5_transformer_pretrained_model_name_or_path: '/home/fbs/jax-test/aurora_f5_transformer.safetensors'
-vocos_vocoder_pretrained_model_name_or_path: '/home/fbs/jax-test/aurora_f5_transformer.safetensors'
+vocos_vocoder_pretrained_model_name_or_path: '/home/fbs/jax-test/vocos.safetensors'
 vocab_name_or_path: '/home/fbs/jax-F5-TTS/vocab.txt'
 compiled_path: '/root/jax-F5-TTS/'
 use_ema: True
@@ -81,7 +81,7 @@ jit_initializers: True
 from_pt: True
 split_head_dim: True
 attention: 'dot_product' # Supported attention: dot_product, flash, cudnn_flash_te
-
+flash_min_seq_length: 4096
 flash_block_sizes: {}
 # Use the following flash_block_sizes on v6e (Trillium) due to larger vmem.
 # flash_block_sizes: {
@@ -137,7 +137,7 @@ diffusion_scheduler_config: {
 base_output_directory: ""
 
 # Hardware
-hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu'
+hardware: 'gpu' # Supported hardware types are 'tpu', 'gpu'
 skip_jax_distributed_system: True
 
 # Parallelism
@@ -185,6 +185,9 @@ ici_tensor_parallelism: 1
 ici_sequence_parallelism: 1
 ici_context_parallelism: 1
 
+
+allow_split_physical_axes: False
+
 # Dataset
 # Replace with dataset path or train_data_dir. One has to be set.
 dataset_name: 'fbs0/aurora_ds'
@@ -214,8 +217,23 @@ transform_images_num_proc: 4
 reuse_example_batch: False
 enable_data_shuffling: True
 
+# Defines the type of gradient checkpoint to enable.
+# NONE - means no gradient checkpoint
+# FULL - means full gradient checkpoint, whenever possible (minimum memory usage)
+# MATMUL_WITHOUT_BATCH - means gradient checkpoint for every linear/matmul operation,
+# except for ones that involve batch dimension - that means that all attention and projection
+# layers will have gradient checkpoint, but not the backward with respect to the parameters.
+# OFFLOAD_MATMUL_WITHOUT_BATCH - same as MATMUL_WITHOUT_BATCH but offload instead of recomputing.
+# CUSTOM - set names to offload and save.
+remat_policy: "NONE"
+# For CUSTOM policy set below, current annotations are for: attn_output, query_proj, key_proj, value_proj
+# xq_out, xk_out, ffn_activation
+names_which_can_be_saved: []
+names_which_can_be_offloaded: []
+
 # checkpoint every number of samples, -1 means don't checkpoint.
 checkpoint_every: -1
+checkpoint_dir: ""
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 

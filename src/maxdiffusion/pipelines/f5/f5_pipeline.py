@@ -82,20 +82,16 @@ def create_sharded_logical_text_encoder(
   if restored_checkpoint:
     f5_config = restored_checkpoint["f5_config"]
   else:
-    f5_config = config
+    f5_config = {}
 
-  # wan_config["mesh"] = mesh
-  # wan_config["dtype"] = config.activations_dtype
-  # wan_config["weights_dtype"] = config.weights_dtype
-  # wan_config["attention"] = config.attention
-  # wan_config["precision"] = get_precision(config)
-  # wan_config["flash_block_sizes"] = get_flash_block_sizes(config)
-  # wan_config["remat_policy"] = config.remat_policy
-  # wan_config["names_which_can_be_saved"] = config.names_which_can_be_saved
-  # wan_config["names_which_can_be_offloaded"] = config.names_which_can_be_offloaded
-  # wan_config["flash_min_seq_length"] = config.flash_min_seq_length
-  # wan_config["dropout"] = config.dropout
-
+  #f5_config["mesh"] = mesh
+  f5_config["dtype"] = config.activations_dtype
+  f5_config["weights_dtype"] = config.weights_dtype
+  f5_config["precision"] = get_precision(config)
+  f5_config["conv_mult"] = config.text_conv_mult
+  f5_config["conv_layers"] = config.text_conv_layers
+  f5_config["text_dim"] = config.text_dim
+  f5_config["text_num_embeds"] = config.text_num_embeds
   # 2. eval_shape - will not use flops or create weights on device
   # thus not using HBM memory.
   p_model_factory = partial(create_model, f5_config=f5_config)
@@ -142,8 +138,19 @@ def create_sharded_logical_transformer(
   if restored_checkpoint:
     f5_config = restored_checkpoint["f5_config"]
   else:
-    f5_config = config
-
+    f5_config = {}
+  f5_config["mesh"] = mesh
+  f5_config["dtype"] = config.activations_dtype
+  f5_config["weights_dtype"] = config.weights_dtype
+  f5_config["attention_kernel"] = config.attention
+  f5_config["precision"] = get_precision(config)
+  f5_config["flash_block_sizes"] = get_flash_block_sizes(config)
+  f5_config["remat_policy"] = config.remat_policy
+  f5_config["names_which_can_be_saved"] = config.names_which_can_be_saved
+  f5_config["names_which_can_be_offloaded"] = config.names_which_can_be_offloaded
+  f5_config["flash_min_seq_length"] = config.flash_min_seq_length
+  f5_config["num_depth"] = config.num_depth
+  #f5_config["dropout"] = config.dropout
   # 2. eval_shape - will not use flops or create weights on device
   # thus not using HBM memory.
   p_model_factory = partial(create_model, f5_config=f5_config)
@@ -164,7 +171,7 @@ def create_sharded_logical_transformer(
     params = restored_checkpoint["f5_transformer_state"]
   else:
     params = load_f5_transformer(
-        config.f5_transformer_pretrained_model_name_or_path, params, "cpu", num_layers=f5_config.num_depth#wan_config["num_layers"]
+        config.f5_transformer_pretrained_model_name_or_path, params, "cpu", num_layers=f5_config["num_depth"]
     )
   params = jax.tree_util.tree_map(lambda x: x.astype(config.weights_dtype), params)
   for path, val in flax.traverse_util.flatten_dict(params).items():
@@ -276,7 +283,7 @@ class F5Pipeline:
     return None
 
   @classmethod
-  def quantize_transformer(cls, config: HyperParameters, model: WanModel, pipeline: "WanPipeline", mesh: Mesh):
+  def quantize_transformer(cls, config: HyperParameters, model: F5Transformer2DModel, pipeline: "WanPipeline", mesh: Mesh):
     """Quantizes the transformer model."""
     q_rules = cls.get_qt_provider(config)
     if not q_rules:
@@ -379,12 +386,12 @@ class F5Pipeline:
   def prepare_latents(
       self,
       batch_size: int,
-      max_frames:int,
+      max_sequence_length:int,
       dtype: jnp.dtype,
       rng: jnp.ndarray,
   ):
 
-    latents = jax.random.normal(rng, (batch_size, max_frames * 256, 100),dtype=dtype)
+    latents = jax.random.normal(rng, (batch_size, max_sequence_length, 100),dtype=dtype)
 
     return latents
 
@@ -425,7 +432,7 @@ class F5Pipeline:
 
     # 4. Stack the list of mel spectrograms into a single JAX array (tensor)
     # This creates a new batch dimension at the beginning.
-    stacked_mels = jnp.stack(all_mels, axis=0)
+    stacked_mels = jnp.concatenate(all_mels, axis=0)
     return stacked_mels, all_lengths
   def __call__(
       self,
@@ -440,6 +447,8 @@ class F5Pipeline:
     # 2. Define call parameters
     if prompt is not None and isinstance(prompt, str):
       prompt = [prompt]
+    if duration is not None and isinstance(duration, int):
+      duration = [duration]
 
     batch_size = len(prompt)
 
@@ -450,7 +459,7 @@ class F5Pipeline:
 
     latents = self.prepare_latents(
         batch_size=batch_size,
-        max_frames=max_sequence_length,
+        max_sequence_length=max_sequence_length,
         dtype=jnp.float32,
         rng=jax.random.key(self.config.seed),
     )
@@ -475,7 +484,8 @@ class F5Pipeline:
     if self.config.global_batch_size_to_train_on // self.config.per_device_batch_size == 0:
       data_sharding = jax.sharding.NamedSharding(self.mesh, P(*self.config.data_sharding))
 
-    prompt_embeds = jax.device_put(prompt_embeds, data_sharding)
+    text_embed_cond = jax.device_put(text_embed_cond, data_sharding)
+    text_embed_uncond = jax.device_put(text_embed_uncond, data_sharding)
 
     graphdef, state, rest_of_state = nnx.split(self.transformer, nnx.Param, ...)
 
@@ -513,29 +523,43 @@ class F5Pipeline:
     audio = self.vocos_vocoder(mel_output)
     return audio
 
-
-@partial(jax.jit, static_argnames=("do_classifier_free_guidance", "guidance_scale"))
-def transformer_forward_pass(
+@jax.jit
+def loop_body(
+    step,
+    args,
     graphdef,
     sharded_state,
     rest_of_state,
-    latents,
-    timestep,
-    prompt_embeds,
-    do_classifier_free_guidance,
-    guidance_scale,
+    cond,
+    decoder_segment_ids,
+    text_embed_cond,
+    text_embed_uncond,
 ):
-  wan_transformer = nnx.merge(graphdef, sharded_state, rest_of_state)
-  noise_pred = wan_transformer(hidden_states=latents, timestep=timestep, encoder_hidden_states=prompt_embeds)
-  if do_classifier_free_guidance:
-    bsz = latents.shape[0] // 2
-    noise_uncond = noise_pred[bsz:]
-    noise_pred = noise_pred[:bsz]
-    noise_pred = noise_uncond + guidance_scale * (noise_pred - noise_uncond)
-    latents = latents[:bsz]
-
-  return noise_pred, latents
-
+    f5_transformer = nnx.merge(graphdef, sharded_state, rest_of_state)
+    latents,  c_ts, p_ts = args
+    latents_dtype = latents.dtype
+    t_curr = c_ts[step]
+    t_prev = p_ts[step]
+    t_vec = jnp.full((latents.shape[0],), t_curr, dtype=latents.dtype)
+    pred = f5_transformer(
+        x=latents,
+        cond=cond,
+        decoder_segment_ids=decoder_segment_ids,
+        text_embed=text_embed_cond,
+        timestep=t_vec,
+    )
+    null_pred = f5_transformer(
+        x=latents,
+        cond=jnp.zeros_like(cond),
+        decoder_segment_ids=decoder_segment_ids,
+        text_embed=text_embed_uncond,
+        timestep=t_vec,
+    )
+    cfg_strength = 2
+    pred = pred + (pred - null_pred) * cfg_strength
+    latents = latents + (t_prev - t_curr) * pred
+    latents = jnp.array(latents, dtype=latents_dtype)
+    return latents, c_ts, p_ts
 
 def run_inference(
     graphdef,
