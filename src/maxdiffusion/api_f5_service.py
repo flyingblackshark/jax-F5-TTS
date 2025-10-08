@@ -1,6 +1,7 @@
 """
 FastAPI inference service for F5 TTS pipeline with automatic batch padding
-to the nearest power-of-two.
+to the nearest power-of-two, refactored to follow JetStream's simple_server
+pattern using FastAPI lifespan and StreamingResponse.
 
 Run:
   uvicorn --app-dir src maxdiffusion.api_f5_service:app --host 0.0.0.0 --port 8000
@@ -10,7 +11,7 @@ Environment:
   Defaults to src/maxdiffusion/configs/f5.yml
 
 Response:
-  Returns base64-encoded WAV audio bytes per input prompt.
+  StreamingResponse with audio/wav bytes (one combined audio per job).
 """
 
 from __future__ import annotations
@@ -22,7 +23,10 @@ from typing import List, Union, Optional, Tuple, Dict
 import numpy as np
 import soundfile as sf
 import librosa
+from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import threading
 import queue
@@ -42,12 +46,6 @@ class InferRequest(BaseModel):
   # Removed max_sequence_length and guidance_scale from request
 
 
-class InferResponse(BaseModel):
-  batch_original: int
-  batch_padded_to: int
-  output_audio: str  # base64-encoded WAV bytes
-
-
 app = FastAPI(title="F5 TTS Inference API", version="0.1.0")
 
 
@@ -56,11 +54,7 @@ _GLOBAL_CONFIG = None
 _DEFAULT_SR = 24000
 _MAX_PROMPTS_PER_BATCH = 128
 
-# Three-thread queues
-_ACCEPT_Q: "queue.Queue[Job]" = queue.Queue()
-_PROCESS_Q: "queue.Queue[Job]" = queue.Queue()
-_RETURN_Q: "queue.Queue[Tuple[str, Dict]]" = queue.Queue()
-_PENDING_RESULTS: Dict[str, "queue.Queue[Dict]"] = {}
+# JetStream-like server uses a single request queue and per-request asyncio.Queue
 _PENDING_LOCK = threading.Lock()
 
 
@@ -68,6 +62,7 @@ _PENDING_LOCK = threading.Lock()
 class Job:
   id: str
   req: "InferRequest"
+  res_queue: "asyncio.Queue[bytes | None]"
 
 
 def _next_power_of_two(n: int) -> int:
@@ -93,38 +88,34 @@ def _default_duration_segments(audio_path: str, sr: int = _DEFAULT_SR) -> int:
   return base_segments + 200  # margin for continuation
 
 
-@app.on_event("startup")
-def _startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
   global _GLOBAL_PIPELINE, _GLOBAL_CONFIG
-  if _GLOBAL_PIPELINE is not None:
-    return
+  if _GLOBAL_PIPELINE is None:
+    default_cfg = os.path.join(os.path.dirname(__file__), "configs", "f5.yml")
+    cfg_path = os.environ.get("F5_CONFIG_PATH", default_cfg)
+    argv = ["api_f5_service.py", cfg_path]
+    pyconfig.initialize(argv)
+    _GLOBAL_CONFIG = pyconfig.config
+    checkpoint_loader = F5Checkpointer(_GLOBAL_CONFIG, "F5_CHECKPOINT")
+    _GLOBAL_PIPELINE = checkpoint_loader.load_checkpoint()
 
-  # Resolve config path
-  default_cfg = os.path.join(os.path.dirname(__file__), "configs", "f5.yml")
-  cfg_path = os.environ.get("F5_CONFIG_PATH", default_cfg)
+  # Create JetStream-style request queue and record event loop
+  app.state.req_queue = queue.Queue()
+  app.state.aio_loop = asyncio.get_running_loop()
 
-  # Initialize pyconfig similar to CLI usage
-  argv = ["api_f5_service.py", cfg_path]
-  pyconfig.initialize(argv)
-  _GLOBAL_CONFIG = pyconfig.config
-
-  # Load pipeline via checkpoint loader
-  checkpoint_loader = F5Checkpointer(_GLOBAL_CONFIG, "F5_CHECKPOINT")
-  _GLOBAL_PIPELINE = checkpoint_loader.load_checkpoint()
-
-  _start_threads()
-
-
-def _start_threads():
-  threading.Thread(target=_dispatcher_loop, name="dispatcher", daemon=True).start()
-  threading.Thread(target=_jax_worker_loop, name="jax_worker", daemon=True).start()
-  threading.Thread(target=_responder_loop, name="responder", daemon=True).start()
+  # Start worker thread
+  threading.Thread(target=_jax_worker_loop, name="jax_worker", args=(app,), daemon=True).start()
+  yield
+  # No explicit teardown needed; thread is daemon
 
 
-def _dispatcher_loop():
-  while True:
-    job = _ACCEPT_Q.get()
-    _PROCESS_Q.put(job)
+# Rebind app with lifespan following JetStream style
+app = FastAPI(lifespan=lifespan, title="F5 TTS Inference API", version="0.1.0")
+
+
+def _put_async(loop: asyncio.AbstractEventLoop, q: "asyncio.Queue", item):
+  loop.call_soon_threadsafe(q.put_nowait, item)
 
 
 def _normalize_job(job: Job) -> Tuple[List[str], List[str], List[int], Optional[str]]:
@@ -154,7 +145,7 @@ def _normalize_job(job: Job) -> Tuple[List[str], List[str], List[int], Optional[
   return prompts, ref_audios, durations, None
 
 
-def _jax_worker_loop():
+def _jax_worker_loop(app: FastAPI):
   while True:
     batch_jobs: List[Job] = []
     batch_prompts: List[str] = []
@@ -162,11 +153,11 @@ def _jax_worker_loop():
     batch_durations: List[int] = []
     per_job_meta: List[Tuple[str, int]] = []
 
-    first_job = _PROCESS_Q.get()
+    first_job = app.state.req_queue.get()
     jobs_to_consider: List[Job] = [first_job]
     try:
       while True:
-        j = _PROCESS_Q.get_nowait()
+        j = app.state.req_queue.get_nowait()
         jobs_to_consider.append(j)
     except Exception:
       pass
@@ -189,7 +180,7 @@ def _jax_worker_loop():
           refs_j = refs_j[:allowed]
           durs_j = durs_j[:allowed]
         else:
-          _PROCESS_Q.put(job)
+          app.state.req_queue.put(job)
           continue
 
       batch_prompts.extend(prompts_j)
@@ -234,29 +225,29 @@ def _jax_worker_loop():
           idx += orig_len
         buf = io.BytesIO()
         sf.write(buf, combined, samplerate=_DEFAULT_SR, format='WAV')
-        audio_b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-        _RETURN_Q.put((job_id, {
-          "batch_original": orig_len,
-          "batch_padded_to": padded_to,
-          "output_audio": audio_b64
-        }))
+        audio_bytes = buf.getvalue()
+        # Find the job's res_queue and stream bytes, then sentinel None
+        for jb in batch_jobs:
+          if jb.id == job_id:
+            _put_async(app.state.aio_loop, jb.res_queue, audio_bytes)
+            _put_async(app.state.aio_loop, jb.res_queue, None)
+            break
     except Exception as e:
-      for job_id, orig_len in per_job_meta:
-        _RETURN_Q.put((job_id, {
-          "error": str(e),
-          "batch_original": orig_len,
-          "batch_padded_to": padded_to,
-          "output_audio": ""
-        }))
+      err_bytes = b""
+      for jb_id, orig_len in per_job_meta:
+        for jb in batch_jobs:
+          if jb.id == jb_id:
+            _put_async(app.state.aio_loop, jb.res_queue, err_bytes)
+            _put_async(app.state.aio_loop, jb.res_queue, None)
+            break
 
 
-def _responder_loop():
+async def streaming_audio(res_queue: "asyncio.Queue[bytes | None]"):
   while True:
-    job_id, resp = _RETURN_Q.get()
-    with _PENDING_LOCK:
-      res_q = _PENDING_RESULTS.get(job_id)
-    if res_q is not None:
-      res_q.put(resp)
+    item = await res_queue.get()
+    if item is None:
+      return
+    yield item
 
 
 @app.get("/health")
@@ -264,31 +255,10 @@ def health():
   return {"status": "ok"}
 
 
-@app.post("/infer", response_model=InferResponse)
-def infer(req: InferRequest):
+@app.post("/generate")
+async def generate(req: InferRequest):
   assert _GLOBAL_PIPELINE is not None, "Pipeline not initialized"
-
+  res_queue: "asyncio.Queue[bytes | None]" = asyncio.Queue()
   job_id = str(uuid.uuid4())
-  res_q: "queue.Queue[Dict]" = queue.Queue(maxsize=1)
-  with _PENDING_LOCK:
-    _PENDING_RESULTS[job_id] = res_q
-  _ACCEPT_Q.put(Job(id=job_id, req=req))
-
-  # Wait for result from responder thread
-  result = res_q.get()
-  with _PENDING_LOCK:
-    _PENDING_RESULTS.pop(job_id, None)
-
-  if "error" in result:
-    # FastAPI will convert this dict to the InferResponse model, missing fields are handled by pydantic
-    return InferResponse(
-      batch_original=result.get("batch_original", 0),
-      batch_padded_to=result.get("batch_padded_to", 0),
-      output_audio=result.get("output_audio", ""),
-    )
-
-  return InferResponse(
-    batch_original=result["batch_original"],
-    batch_padded_to=result["batch_padded_to"],
-    output_audio=result["output_audio"],
-  )
+  app.state.req_queue.put_nowait(Job(id=job_id, req=req, res_queue=res_queue))
+  return StreamingResponse(streaming_audio(res_queue), media_type="audio/wav")
