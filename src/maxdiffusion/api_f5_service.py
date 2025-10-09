@@ -34,7 +34,8 @@ import uuid
 from dataclasses import dataclass
 import io
 import base64
-
+import uvicorn
+import jax
 from maxdiffusion import pyconfig
 from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
 
@@ -262,3 +263,13 @@ async def generate(req: InferRequest):
   job_id = str(uuid.uuid4())
   app.state.req_queue.put_nowait(Job(id=job_id, req=req, res_queue=res_queue))
   return StreamingResponse(streaming_audio(res_queue), media_type="audio/wav")
+
+
+def main():
+  host = os.environ.get("HOST", "0.0.0.0")
+  port = int(os.environ.get("PORT", "8000"))
+  uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+  main()

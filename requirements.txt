@@ -36,3 +36,4 @@ jieba
 pypinyin
 librosa
 jax_vocos
+qwix@git+https://github.com/google/qwix.git
