@@ -1,27 +1,13 @@
 import gradio as gr # Import Gradio
 from typing import Sequence, Tuple
 from absl import app
-import functools
 import numpy as np
-import jax
 from jax.sharding import Mesh, PartitionSpec as P
-import jax.numpy as jnp
-import flax
 from maxdiffusion import pyconfig, max_logging
-from maxdiffusion.models.f5.transformers.transformer_f5_flax import F5TextEmbedding, F5Transformer2DModel
-from maxdiffusion.max_utils import (
-    create_device_mesh,
-    get_flash_block_sizes,
-    get_precision,
-    setup_initial_state,
-)
 import time
-from maxdiffusion.models.modeling_flax_pytorch_utils import convert_f5_state_dict_to_flax
 import librosa
-from jax_vocos import load_model as load_vocos_model # Renamed to avoid conflict
-from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
-from maxdiffusion.utils.seq_utils import lens_to_mask
+
 # --- Configuration & Constants ---
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
@@ -35,91 +21,9 @@ MAX_CHUNKS = BUCKET_SIZES[-1]
 # --- JAX/Model Setup (Global Scope for Gradio) ---
 # These will be initialized once when the script starts
 global_config = None
-global_mesh = None
-global_transformer = None
-global_transformer_state = None
-global_transformer_state_shardings = None
-global_text_encoder = None
-global_text_encoder_params = None
-global_jitted_text_encode = None
-global_vocos_model = None
-global_vocos_params = None
-global_jitted_vocos_apply = None
-global_vocab_char_map = None
-global_vocab_size = None
-global_p_run_inference = None
-global_data_sharding = None
-global_max_sequence_length = None # Will be set during setup
+global_max_sequence_length = 2048
+#global_max_sequence_length = None # Will be set during setup
 # --- Core Diffusion Loop Logic (Unchanged) ---
-
-def loop_body(
-    step,
-    args,
-    transformer,
-    cond,
-    decoder_segment_ids,
-    text_embed_cond,
-    text_embed_uncond,
-):
-    latents, state, c_ts, p_ts = args
-    latents_dtype = latents.dtype
-    t_curr = c_ts[step]
-    t_prev = p_ts[step]
-    t_vec = jnp.full((latents.shape[0],), t_curr, dtype=latents.dtype)
-
-    # Conditional prediction
-    pred = transformer.apply(
-        {"params": state.params},
-        x=latents,
-        cond=cond,
-        decoder_segment_ids=decoder_segment_ids,
-        text_embed=text_embed_cond,
-        timestep=t_vec,
-    )
-
-    # Unconditional prediction
-    null_pred = transformer.apply(
-        {"params": state.params},
-        x=latents,
-        cond=jnp.zeros_like(cond),
-        decoder_segment_ids=decoder_segment_ids,
-        text_embed=text_embed_uncond,
-        timestep=t_vec,
-    )
-
-    # Classifier-Free Guidance
-    guidance_scale = cfg_strength # Use global or Gradio input
-    pred = null_pred + guidance_scale * (pred - null_pred)
-
-    # DDIM-like step (simplified Euler)
-    latents = latents + (t_prev - t_curr) * pred # This matches the original Euler step
-    latents = jnp.array(latents, dtype=latents_dtype) # Recast JAX tracer
-
-    return latents, state, c_ts, p_ts
-
-
-def run_inference(
-    states, latents, cond, decoder_segment_ids, text_embed_cond, text_embed_uncond, c_ts, p_ts, transformer, config, mesh
-):
-    transformer_state = states # Assuming states only contain transformer state now
-
-    loop_body_p = functools.partial(
-        loop_body,
-        transformer=transformer,
-        cond=cond,
-        decoder_segment_ids=decoder_segment_ids,
-        text_embed_cond=text_embed_cond,
-        text_embed_uncond=text_embed_uncond,
-    )
-
-    # Removed partitioning axis rules context, assume handled by sharding annotations or global context
-    # with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    # We need the state back if it were being updated (e.g., BatchNorm), but it's not here.
-    latents_final, _, _, _ = jax.lax.fori_loop(0, len(c_ts), loop_body_p, (latents, transformer_state, c_ts, p_ts))
-
-    return latents_final
-
-# --- Gradio Inference Function ---
 
 def generate_audio(
     ref_text: str,
@@ -280,154 +184,14 @@ def generate_audio(
         batched_duration_frames.append(duration_frames)
         max_logging.log(f"Chunk {i+1}/{len(gen_text_batches)}: Combined text len: {len(text_combined)}, Estimated total frames: {duration_frames}")
 
-
-    # Convert text to pinyin/chars list
-    # This step can be slow, especially for long texts
-    pinyin_start_time = time.time()
-    final_text_list_pinyin = convert_char_to_pinyin(batched_text_list_combined)
-    max_logging.log(f"Pinyin conversion took {time.time() - pinyin_start_time:.2f}s")
-
-    text_ids_unpadded = list_str_to_idx(final_text_list_pinyin, global_vocab_char_map, max_length=global_max_sequence_length)
-    text_ids = np.pad(text_ids_unpadded, ((0, padded_items_count), (0, 0)), constant_values=0)
-    ref_audio_padded = np.pad(ref_audio, (0, max(0, global_max_sequence_length * hop_length + hop_length - ref_audio.shape[0])))
-    ref_audio_padded = ref_audio_padded[np.newaxis, :]
-    cond = jitted_get_mel(ref_audio_padded)
-    cond_pad_len = global_max_sequence_length - cond.shape[1]
-    if cond_pad_len > 0:
-        cond = np.pad(cond, ((0,0), (0, cond_pad_len), (0,0)))
-    elif cond_pad_len < 0:
-        cond = cond[:, :global_max_sequence_length, :]
-    # Broadcast condition to the final target batch size
-    cond = np.repeat(cond, total_batch_items, axis=0)
-
-    # === Apply Padding to duration_frames_arr ===
-    # Use a safe padding value (e.g., min possible duration) for padding items
-    safe_padding_duration = ref_audio_len_frames + 1
-    padded_durations = batched_duration_frames + [safe_padding_duration] * padded_items_count
-    duration_frames_arr = np.array(padded_durations, dtype=np.int32)
-    # ==========================================
-
-    # (Mask Calculation - uses total_batch_items and padded arrays)
-    # Create ref_len array for the total batch size
-    ref_len_frames_arr = np.array([ref_audio_len_frames] * total_batch_items, dtype=np.int32)
-
-    # Ensure padded duration array elements don't exceed max length and are >= ref length + 1
-    duration_frames_arr = np.minimum(duration_frames_arr, global_max_sequence_length)
-    duration_frames_arr = np.maximum(duration_frames_arr, ref_len_frames_arr + 1)
-
-    # Calculate text lengths based on the *padded* text_ids
-    text_lens = np.minimum((text_ids != 0).sum(axis=-1), global_max_sequence_length)
-
-
-    # Calculate final duration using padded arrays
-    effective_min_len = np.maximum(text_lens, ref_len_frames_arr) + 1
-    duration_final = np.maximum(effective_min_len, duration_frames_arr)
-    duration_final = np.minimum(duration_final, global_max_sequence_length) # Final cap
-
-    # Create masks using final calculated lengths
-    cond_mask = lens_to_mask(ref_len_frames_arr, length=global_max_sequence_length) # Mask for reference audio part
-    decoder_mask = lens_to_mask(duration_final, length=global_max_sequence_length)  # Mask for the whole sequence generation
-
-    # Prepare segment IDs
-    text_decoder_segment_ids = (text_ids != 0).astype(np.int32) # Mask based on text tokens
-    decoder_segment_ids = decoder_mask.astype(np.int32)        # Mask based on calculated total duration
-
-    # Apply conditional mask (uses broadcasted cond and cond_mask)
-    step_cond = np.where( cond_mask[..., np.newaxis], cond, np.zeros_like(cond) )
-
-    # --- Shard data ---
-    step_cond = jax.device_put(step_cond, global_data_sharding)
-    text_ids = jax.device_put(text_ids, global_data_sharding)
-    decoder_segment_ids = jax.device_put(decoder_segment_ids, global_data_sharding)
-    text_decoder_segment_ids = jax.device_put(text_decoder_segment_ids, global_data_sharding)
-    cond_mask_sharded = jax.device_put(cond_mask, global_data_sharding) # Shard this too for final masking
-
-
-    t_end_preprocess = time.time()
-    max_logging.log(f"Preprocessing finished in {t_end_preprocess - t_start_preprocess:.2f}s.")
-    #get_memory_allocations()
-
-    # --- Text Embedding ---
-    t_start_embed = time.time()
-    max_logging.log("Generating text embeddings...")
-    rng_embed = jax.random.key(global_config.seed + 1) # Use a different seed
-    rngs_embed = {'params': rng_embed, 'dropout': rng_embed}
-
-    text_embed_cond = global_jitted_text_encode_func({"params": global_text_encoder_params},
-                                          text_ids,
-                                          text_decoder_segment_ids,
-                                         rngs_embed)
-
-    # Unconditional embeddings (zero text input)
-    text_embed_uncond = global_jitted_text_encode_func({"params": global_text_encoder_params},
-                                  np.zeros_like(text_ids),
-                                  text_decoder_segment_ids, # Use zero mask too
-                                  rngs_embed)
-    t_end_embed = time.time()
-    max_logging.log(f"Text embedding generation took {t_end_embed - t_start_embed:.2f}s.")
-    #get_memory_allocations()
-
-
-    # --- Diffusion Sampling ---
-    t_start_diffusion = time.time()
-    max_logging.log(f"Starting diffusion sampling with {num_inference_steps} steps...")
-
-    # Initial noise (latents)
-    latents_shape = (total_batch_items, global_max_sequence_length, 100) # Get latent_dim from model
-    latents_rng = jax.random.key(global_config.seed + 2)
-    latents = jax.random.normal(latents_rng, latents_shape, dtype=jnp.float32)
-    latents = jax.device_put(latents, global_data_sharding)
-
-    # === MODIFIED Timestep Calculation ===
-    t_start = 0.0
-    timesteps = np.linspace(t_start, 1.0, num_inference_steps + 1).astype(np.float32)
-
-    if use_sway_sampling:
-        # Get coefficient from config, default to 0.0 if not found
-        sway_coef = global_config.sway_sampling_coef
-        if sway_coef is not None:
-            max_logging.log(f"Applying Sway Sampling with coefficient: {sway_coef}")
-            timesteps = timesteps + sway_coef * (np.cos(np.pi / 2 * timesteps) - 1 + timesteps)
-            # Clip timesteps to ensure they remain in [0, 1] after adjustment
-            timesteps = np.clip(timesteps, 0.0, 1.0)
-        else:
-            max_logging.log("Sway sampling enabled but coefficient is 0 or missing in config. Skipping.")
-    else:
-        max_logging.log("Sway sampling disabled.")
-
-    c_ts = timesteps[:-1] # Current timesteps
-    p_ts = timesteps[1:]  # Previous timesteps (sigma_{t-1}, sigma_t in DDIM terms if reversed)
-    # === End of Modified Timestep Calculation ===
-
-    y_final_latents = global_p_run_inference_func(
-        global_transformer_state, # Pass state
-        latents,
-        step_cond,
-        decoder_segment_ids,
-        text_embed_cond,
-        text_embed_uncond,
-        c_ts,
-        p_ts
+    audio_out_jax = global_f5_pipeline(
+        prompt=batched_text_list_combined,
+        reference_audio=["/home/fbs/jax-F5-TTS/test.mp3" for i in range(len(batched_text_list_combined))],
+        duration=batched_duration_frames,
+        max_sequence_length=global_max_sequence_length,
     )
+    
 
-    # Ensure computation happens
-    y_final_latents.block_until_ready()
-    t_end_diffusion = time.time()
-    max_logging.log(f"Diffusion sampling finished in {t_end_diffusion - t_start_diffusion:.2f}s.")
-    # --- Postprocessing (Vocoder) ---
-    t_start_post = time.time()
-    max_logging.log("Applying Vocoder...")
-
-    # Combine condition and generated parts
-    # Use sharded cond_mask here
-    out_latents = jnp.where(cond_mask_sharded[..., jnp.newaxis], cond, y_final_latents)
-
-    # Apply Vocoder
-    vocoder_rng = jax.random.key(global_config.seed + 3)
-    rngs_vocoder = {'params': vocoder_rng, 'dropout': vocoder_rng} # Vocos might need dropout rng
-    # Vocoder expects (batch, seq_len, mel_bins)
-    # Apply on device
-    audio_out_jax = global_jitted_vocos_apply_func({"params": global_vocos_params}, out_latents, rngs_vocoder)
     audio_out_jax.block_until_ready() # Wait for vocoder to finish
 
     # Transfer *only the necessary data* to CPU
@@ -440,9 +204,6 @@ def generate_audio(
     # Transfer all generated audio data for the valid chunks
     audio_out_cpu = np.asarray(audio_out_jax[:num_chunks])
 
-    t_end_post = time.time()
-    max_logging.log(f"Vocoder and transfer took {t_end_post - t_start_post:.2f}s.")
-    #get_memory_allocations()
 
 
     # --- Final Audio Stitching ---
@@ -486,209 +247,16 @@ def generate_audio(
 
 # --- Setup Function ---
 def setup_models_and_state(config):
-    global global_config, global_mesh, global_transformer, global_transformer_state
-    global global_transformer_state_shardings, global_text_encoder, global_text_encoder_params
-    global global_jitted_text_encode_func, global_vocos_model, global_vocos_params
-    global global_jitted_vocos_apply_func, global_vocab_char_map, global_vocab_size
-    global global_p_run_inference_func, global_data_sharding, global_max_sequence_length
-    global jitted_get_mel
-
-    t_start_setup = time.time()
-    max_logging.log("Starting one-time setup...")
-    global_config = config # Store config globally
-
-    flash_block_sizes = get_flash_block_sizes(config)
-    # Store max sequence length from config
-    global_max_sequence_length = config.max_sequence_length
-    max_logging.log(f"Model configured for max sequence length: {global_max_sequence_length}")
-
-    rng = jax.random.key(config.seed)
-    devices_array = create_device_mesh(config)
-    global_mesh = Mesh(devices_array, config.mesh_axes)
-    mesh = global_mesh # Use local variable for clarity in setup
-
-    if not config.mesh_axes: raise ValueError("config.mesh_axes must be defined (e.g., ['data'])")
-    data_axis_name = config.mesh_axes[0]
-    model_axis_names = config.mesh_axes[1:]
-    max_logging.log(f"Using mesh axes: {config.mesh_axes} (Data axis: '{data_axis_name}')")
-    # Determine batch size based on devices
-    #num_devices = len(jax.devices())
-    #global_batch_size = config.per_device_batch_size * num_devices
-    #max_logging.log(f"Using global batch size: {global_batch_size} ({config.per_device_batch_size} per device)")
-        # --- Define Basic Sharding Specs ---
-    # (Keep existing specs: batch_only, batch_seq, batch_seq_dim, replicated)
-    sharding_spec_batch_only = P(data_axis_name)
-    sharding_spec_batch_seq = P(data_axis_name, None)
-    sharding_spec_batch_seq_dim = P(data_axis_name, None, None)
-    #sharding_spec_replicated = P()
-    # === NEW: Sharding spec for get_mel input/output ===
-    # Input y: (Batch, AudioLength) -> Shard AudioLength along data_axis_name
-    sharding_spec_get_mel_input = P(None, data_axis_name)
-    # Output spec: (Batch, MelSeqLength, NumMels) -> Shard MelSeqLength along data_axis_name
-    sharding_spec_get_mel_output = P(None, data_axis_name, None)
-    # =================================================
-
-    get_mel_in_shardings = (jax.sharding.NamedSharding(mesh, sharding_spec_get_mel_input),) # Tuple for positional args
-    # Define the sharding for the output spectrogram
-    #get_mel_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_replicated)
-    get_mel_out_shardings = None
-
-    # Create the jitted function with sharding info
-    # Static argnums remain the same as they refer to non-JAX array arguments
-    jitted_get_mel = jax.jit(
-        get_mel,
-        static_argnums=(1, 2, 3, 4, 5, 6, 8), # n_mels, n_fft, etc.
-        in_shardings=get_mel_in_shardings,
-        out_shardings=get_mel_out_shardings
-    )
+    global global_config
+    global global_f5_pipeline
 
     # --- Load Transformer ---
-    max_logging.log("Loading F5 Transformer model...")
+    max_logging.log("Loading F5 Pipeline...")
 
-    global_transformer = F5Transformer2DModel(
-        text_dim=config.text_dim, # Make sure text_dim is in config
-        mel_dim=config.mel_dim, # Make sure mel_dim is in config
-        dim=config.latent_dim, # Make sure latent_dim is in config
-        head_dim=config.head_dim,
-        num_depth=config.num_depth,
-        num_heads=config.num_heads,
-
-        mesh=mesh,
-        attention_kernel=config.attention,
-        flash_block_sizes=flash_block_sizes,
-        dtype=config.activations_dtype,
-        weights_dtype=config.weights_dtype,
-        precision=get_precision(config),
-    )
-    transformer = global_transformer # Local var
-
-    # Load weights
-    transformer_params, text_encoder_params_loaded = convert_f5_state_dict_to_flax(
-        config.pretrained_model_name_or_path, use_ema=config.use_ema
-    )
-    global_text_encoder_params = flax.core.frozen_dict.FrozenDict(text_encoder_params_loaded) # Store globally
-
-    weights_init_fn = functools.partial(transformer.init_weights, rngs=rng, max_sequence_length=config.max_sequence_length, eval_only=False)
-    global_transformer_state, global_transformer_state_shardings = setup_initial_state(
-        model=transformer,
-        tx=None,
-        config=config,
-        mesh=mesh,
-        weights_init_fn=weights_init_fn,
-        model_params=None,
-        training=False,
-    )
-    global_transformer_state = global_transformer_state.replace(params=transformer_params)
-    global_transformer_state = jax.device_put(global_transformer_state, global_transformer_state_shardings)
-    # --- Load Text Encoder ---
-    max_logging.log("Loading Text Encoder model...")
-    # Infer text_num_embeds from vocab size if possible, or set in config
-    global_vocab_char_map, global_vocab_size = get_tokenizer(config.vocab_name_or_path, "custom")
-
-    global_text_encoder = F5TextEmbedding(
-        precompute_max_pos=config.max_sequence_length,
-        text_num_embeds=config.text_num_embeds, # Add 1 if using +1 shift in list_str_to_idx (or adjust tokenizer/model)
-        text_dim=config.text_dim,
-        conv_layers=config.text_conv_layers,
-        # Add other necessary params from F5TextEmbedding definition
-        dtype=jnp.float32
-    )
-
-    global_text_encoder_params = jax.device_put(global_text_encoder_params, jax.sharding.NamedSharding(mesh, P()))
-    max_logging.log("Text encoder params replicated on devices.")
-
-    text_encode_in_shardings = (
-        jax.sharding.NamedSharding(mesh, P()), # Params (replicated)
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq), 
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq),
-        jax.sharding.NamedSharding(mesh, P()),       
-    )
-    # Define output sharding (usually replicated or matches consumer needs)
-    # Assuming output might be replicated or used on host later
-    text_encode_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim)
-    def wrap_text_encoder_apply(params,text_ids,text_decoder_segment_ids,rngs):
-        return global_text_encoder.apply(params,text_ids,text_decoder_segment_ids,rngs=rngs)
-
-    global_jitted_text_encode_func = jax.jit(
-        wrap_text_encoder_apply,
-        in_shardings=text_encode_in_shardings, # Note the tuple structure for args tree
-        out_shardings=text_encode_out_shardings,
-        static_argnums=() # No static args in apply needed here
-    )
-
-
-    max_logging.log("Text Encoder JIT create.")
-
-
-    # --- Load Vocoder ---
-    max_logging.log("Loading Vocoder model...")
-    # Assumes load_model() returns model definition and params
-    global_vocos_model, vocos_params_loaded = load_vocos_model(config.vocoder_model_path) # Add vocoder path to config
-    global_vocos_params = flax.core.frozen_dict.FrozenDict(vocos_params_loaded) # Store globally
-
-    # Shard Vocoder Params (Replicated is usually sufficient)
-    global_vocos_params = jax.device_put(global_vocos_params, jax.sharding.NamedSharding(mesh, P()))
-    max_logging.log("Vocoder params replicated on devices.")
-
-    vocos_apply_in_shardings = (
-        jax.sharding.NamedSharding(mesh, P()),
-        jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq_dim),
-        jax.sharding.NamedSharding(mesh, P()),
-    )
-
-    # Output is (Batch, AudioLen), so shard batch dim
-    vocos_apply_out_shardings = jax.sharding.NamedSharding(mesh, sharding_spec_batch_seq) # Assuming AudioLen is like Seq dim
-    def wrap_vocos_apply(params,x,rngs):
-        return global_vocos_model.apply(params,x,rngs=rngs)
-
-    global_jitted_vocos_apply_func = jax.jit(
-        wrap_vocos_apply,
-        in_shardings=vocos_apply_in_shardings,
-        out_shardings=vocos_apply_out_shardings,
-        static_argnums=()
-    )
-
-    global_data_sharding = jax.sharding.NamedSharding(mesh, P(config.data_sharding[0])) # Assuming first axis is batch for data
-
-    # Define shardings for inputs to run_inference
-    # state sharding already defined: global_transformer_state_shardings
-    latents_sharding = global_data_sharding
-    cond_sharding = global_data_sharding
-    decoder_segment_ids_sharding = global_data_sharding
-    text_embed_sharding = global_data_sharding # Or P() if replicated output from text_encoder
-
-    # Timesteps are usually replicated
-    ts_sharding = jax.sharding.NamedSharding(mesh, P())
-
-    # JIT the run_inference function
-    # Use functools.partial to fix static arguments like model def, config, mesh
-    partial_run_inference = functools.partial(
-        run_inference,
-        transformer=transformer, # Pass model def
-        config=config,
-        mesh=mesh,
-        # Other args (latents, cond, etc.) will be provided at call time
-    )
-
-    # Define input shardings for the *dynamic* arguments of run_inference
-    in_shardings_inf = (
-        global_transformer_state_shardings, # states
-        latents_sharding,                # latents
-        cond_sharding,                   # cond
-        decoder_segment_ids_sharding,    # decoder_segment_ids
-        text_embed_sharding,             # text_embed_cond
-        text_embed_sharding,             # text_embed_uncond
-        ts_sharding,                     # c_ts
-        ts_sharding                      # p_ts
-    )
-    # Output sharding (final latents) - should match data sharding probably
-    out_shardings_inf = latents_sharding
-    global_p_run_inference_func = jax.jit(
-        partial_run_inference,
-        static_argnums=(), # No static args in the partial itself anymore
-        in_shardings=in_shardings_inf,
-        out_shardings=out_shardings_inf,
-    )
+    from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
+    global_config = config
+    checkpoint_loader = F5Checkpointer(global_config, "F5_CHECKPOINT")
+    global_f5_pipeline = checkpoint_loader.load_checkpoint()
 
 # --- Main Execution Logic ---
 def main(argv: Sequence[str]) -> None:
