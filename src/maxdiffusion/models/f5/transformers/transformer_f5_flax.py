@@ -453,17 +453,19 @@ class F5TextEmbedding(nnx.Module):
         if conv_layers > 0:
             self.extra_modeling = True
             #self.freqs_cis = precompute_freqs_cis(text_dim, precompute_max_pos)
-            self.text_blocks = [
-                ConvNeXtV2Block(
-                    dim=text_dim,
-                    intermediate_dim=text_dim * conv_mult,
-                    dtype=dtype,
-                    weights_dtype=weights_dtype,
-                    precision=precision,
-                    rngs=rngs,
+            text_blocks = nnx.List([])
+            for _ in range(conv_layers):
+                text_blocks.append(
+                    ConvNeXtV2Block(
+                        dim=text_dim,
+                        intermediate_dim=text_dim * conv_mult,
+                        dtype=dtype,
+                        weights_dtype=weights_dtype,
+                        precision=precision,
+                        rngs=rngs,
+                    )
                 )
-                for _ in range(conv_layers)
-            ]
+            self.text_blocks = text_blocks
         else:
             self.extra_modeling = False
 
