@@ -399,24 +399,78 @@ class F5Pipeline:
 
     return latents
 
-  def get_ref_mel(self, reference_audio: Union[str,List[str]] ,max_sequence_length : int):
-    if isinstance(reference_audio, str):
-        audio_paths = [reference_audio]
+  def get_ref_mel(self, reference_audio: Union[str,List[str], np.ndarray, tuple] ,max_sequence_length : int):
+    # Normalize input to a list of audio items (path | ndarray | (sr, data))
+    if isinstance(reference_audio, (str, np.ndarray, tuple)):
+        audio_items = [reference_audio]
     elif isinstance(reference_audio, list):
-        audio_paths = reference_audio
+        audio_items = reference_audio
     else:
-        raise TypeError(f"Input 'reference_audio' must be a str or List[str], but got {type(reference_audio)}")
-    batch_size = len(reference_audio)
-    reference_audio = [u for u in reference_audio if u is not None]
+        raise TypeError(f"Input 'reference_audio' must be a str, np.ndarray, (sr, data) tuple, or a list of them, but got {type(reference_audio)}")
+
+    # Drop None entries, compute batch size based on items count
+    audio_items = [u for u in audio_items if u is not None]
+    batch_size = len(audio_items)
 
     ref_max_samples = max_sequence_length * 256
     all_lengths = []
     all_ref_audio = []
 
-      # 2. Iterate over each audio path
-    for path in audio_paths:
-        # Load audio file
-        ref_audio, _ = librosa.load(path, sr=24000)
+    # Iterate and load/normalize each audio item
+    for item in audio_items:
+        # Case 1: path string
+        if isinstance(item, str):
+            ref_audio, _ = librosa.load(item, sr=24000)
+        # Case 2: (sr, data) tuple
+        elif isinstance(item, tuple) and len(item) == 2:
+            sr, data = item
+            # ensure float32 in [-1,1]
+            if data.dtype.kind in {"i", "u"}:
+                data = data.astype(np.float32) / 32768.0
+            else:
+                data = data.astype(np.float32)
+            # resample if needed
+            if sr != 24000:
+                ref_audio = librosa.resample(data, orig_sr=sr, target_sr=24000)
+            else:
+                ref_audio = data
+        # Case 3: raw numpy array
+        elif isinstance(item, np.ndarray):
+            ref_audio = item
+            # convert dtype and scale if integer
+            if ref_audio.dtype.kind in {"i", "u"}:
+                ref_audio = ref_audio.astype(np.float32) / 32768.0
+            else:
+                ref_audio = ref_audio.astype(np.float32)
+            # assume sr=24000 for arrays; user should provide tuple if otherwise
+        else:
+            raise TypeError(f"Unsupported reference_audio element type: {type(item)}")
+
+        # mono-ize if multi-channel
+        if ref_audio.ndim > 1:
+            ref_audio = np.mean(ref_audio, axis=-1)
+
+        # Calculate original length in frames
+        ref_audio_len = ref_audio.shape[-1] // 256 + 1
+        all_lengths.append(ref_audio_len)
+
+        # Pad or truncate waveform to required length
+        target_len = ref_max_samples - 256
+        if ref_audio.shape[0] > target_len:
+            ref_audio = ref_audio[:target_len]
+        else:
+            ref_audio = np.pad(ref_audio, (0, max(0, target_len - ref_audio.shape[0])))
+        all_ref_audio.append(ref_audio)
+
+    # Stack and pad to batch size if fewer valid items than batch
+    if len(all_ref_audio) == 0:
+        # create an empty batch of zeros if inputs were all None/empty
+        all_ref_audio = np.zeros((batch_size, ref_max_samples - 256), dtype=np.float32)
+    all_ref_audio = jnp.asarray(all_ref_audio)
+    all_ref_audio = jnp.pad(all_ref_audio, ((0, batch_size - all_ref_audio.shape[0]), (0, 0)))
+    all_mels = get_mel(all_ref_audio)
+
+    return all_mels, all_lengths
 
         # Calculate the original length in frames (before padding)
         ref_audio_len = ref_audio.shape[-1] // 256 + 1
@@ -445,7 +499,7 @@ class F5Pipeline:
   def __call__(
       self,
       prompt: Union[str, List[str]] = None,
-      reference_audio : Union[str,List[str]] = "/home/fbs/jax-F5-TTS/test.mp3",
+      reference_audio : Union[str,List[str], np.ndarray, tuple] = None,
       duration: Union[int,List[int]] = None,
       max_sequence_length: int = 512,
   ):

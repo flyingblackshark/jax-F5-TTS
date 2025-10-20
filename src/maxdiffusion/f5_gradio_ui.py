@@ -180,7 +180,7 @@ def generate_audio(
 
     audio_out_jax = global_f5_pipeline(
         prompt=batched_text_list_combined,
-        reference_audio=["/home/fbs/jax-F5-TTS/test.mp3" for i in range(len(batched_text_list_combined))],
+        reference_audio=[ref_audio for _ in range(len(batched_text_list_combined))],
         duration=batched_duration_frames,
         max_sequence_length=global_max_sequence_length,
     )
