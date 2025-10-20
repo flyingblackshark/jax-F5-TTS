@@ -7,7 +7,7 @@ import time
 import librosa
 import jax
 from maxdiffusion.utils.pinyin_utils import chunk_text
-
+import flax
 # --- Configuration & Constants ---
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
@@ -255,6 +255,7 @@ def setup_models_and_state(config):
 # --- Main Execution Logic ---
 def main(argv: Sequence[str]) -> None:
     pyconfig.initialize(argv)
+    flax.config.update('flax_always_shard_variable', False)
     config = pyconfig.config
 
     # Perform one-time setup
