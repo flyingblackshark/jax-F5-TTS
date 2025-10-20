@@ -449,29 +449,6 @@ class F5Pipeline:
         # mono-ize if multi-channel
         if ref_audio.ndim > 1:
             ref_audio = np.mean(ref_audio, axis=-1)
-
-        # Calculate original length in frames
-        ref_audio_len = ref_audio.shape[-1] // 256 + 1
-        all_lengths.append(ref_audio_len)
-
-        # Pad or truncate waveform to required length
-        target_len = ref_max_samples - 256
-        if ref_audio.shape[0] > target_len:
-            ref_audio = ref_audio[:target_len]
-        else:
-            ref_audio = np.pad(ref_audio, (0, max(0, target_len - ref_audio.shape[0])))
-        all_ref_audio.append(ref_audio)
-
-    # Stack and pad to batch size if fewer valid items than batch
-    if len(all_ref_audio) == 0:
-        # create an empty batch of zeros if inputs were all None/empty
-        all_ref_audio = np.zeros((batch_size, ref_max_samples - 256), dtype=np.float32)
-    all_ref_audio = jnp.asarray(all_ref_audio)
-    all_ref_audio = jnp.pad(all_ref_audio, ((0, batch_size - all_ref_audio.shape[0]), (0, 0)))
-    all_mels = get_mel(all_ref_audio)
-
-    return all_mels, all_lengths
-
         # Calculate the original length in frames (before padding)
         ref_audio_len = ref_audio.shape[-1] // 256 + 1
         all_lengths.append(ref_audio_len)
