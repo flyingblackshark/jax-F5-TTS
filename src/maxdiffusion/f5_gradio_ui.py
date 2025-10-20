@@ -2,11 +2,11 @@ import gradio as gr # Import Gradio
 from typing import Sequence, Tuple
 from absl import app
 import numpy as np
-from jax.sharding import Mesh, PartitionSpec as P
 from maxdiffusion import pyconfig, max_logging
 import time
 import librosa
-from maxdiffusion.utils.pinyin_utils import get_tokenizer,chunk_text,convert_char_to_pinyin,list_str_to_idx
+import jax
+from maxdiffusion.utils.pinyin_utils import chunk_text
 
 # --- Configuration & Constants ---
 cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
@@ -14,8 +14,7 @@ TARGET_SR = 24000
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
 # === Add Bucket Constants ===
-BUCKET_SIZES = sorted([4, 8, 16, 32, 64])
-MAX_CHUNKS = BUCKET_SIZES[-1]
+MAX_CHUNKS = 64
 # ==========================
 
 # --- JAX/Model Setup (Global Scope for Gradio) ---
@@ -104,35 +103,23 @@ def generate_audio(
     num_chunks = len(gen_text_batches)
     max_logging.log(f"Split generation text into {num_chunks} chunks.")
 
-    MAX_CHUNKS = global_config.bucket_sizes[-1]
-    BUCKET_SIZES = global_config.bucket_sizes
-    # === NEW: Batch Size Bucketing Logic ===
     if num_chunks == 0:
          raise gr.Error("Text processing resulted in zero valid chunks. Try different text.")
     if num_chunks > MAX_CHUNKS:
         raise gr.Error(f"Too many text chunks ({num_chunks}). Maximum allowed is {MAX_CHUNKS}. Please shorten the 'Text to Generate'.")
 
+    device_count = jax.device_count()
+    multiplier = 1
+    while device_count * multiplier < num_chunks:
+        multiplier <<= 1
+    desired_batch_size = device_count * multiplier
+    if desired_batch_size > MAX_CHUNKS:
+        raise gr.Error(f"Too many text chunks ({num_chunks}). Cannot pad to device_count * 2^n within max {MAX_CHUNKS} chunks.")
 
-    max_logging.log(f"Split generation text into {len(gen_text_batches)} chunks.")
-
-    # === NEW: Batch Size Bucketing Logic ===
-    if num_chunks == 0:
-         raise gr.Error("Text processing resulted in zero valid chunks. Try different text.")
-    if num_chunks > MAX_CHUNKS:
-        raise gr.Error(f"Too many text chunks ({num_chunks}). Maximum allowed is {MAX_CHUNKS}. Please shorten the 'Text to Generate'.")
-
-    # Find the target batch size from buckets
-    target_batch_size = MAX_CHUNKS # Initialize just in case
-    for bucket in BUCKET_SIZES:
-        if num_chunks <= bucket:
-            target_batch_size = bucket
-            break
-    
+    target_batch_size = desired_batch_size
     padded_items_count = target_batch_size - num_chunks
-    total_batch_items = target_batch_size # This is the final batch dimension size
 
-    max_logging.log(f"Processing {num_chunks} chunks. Padding to nearest bucket size: {target_batch_size} (adding {padded_items_count} padding items).")
-    # === End of Bucketing Logic ===
+    max_logging.log(f"Processing {num_chunks} chunks. Padding to device-count*2^n: {target_batch_size} (adding {padded_items_count} padding items).")
 
     batched_text_list_combined = []
     batched_duration_frames = [] # Duration in mel frames (samples // hop_length)
@@ -183,6 +170,13 @@ def generate_audio(
 
         batched_duration_frames.append(duration_frames)
         max_logging.log(f"Chunk {i+1}/{len(gen_text_batches)}: Combined text len: {len(text_combined)}, Estimated total frames: {duration_frames}")
+
+    # Append padding items so batch size is a multiple of devices
+    if padded_items_count > 0:
+        for _ in range(padded_items_count):
+            batched_text_list_combined.append(ref_text)
+            batched_duration_frames.append(min(global_max_sequence_length, ref_audio_len_frames + 1))
+        max_logging.log(f"Added {padded_items_count} padded items for device alignment (total batch {len(batched_text_list_combined)}).")
 
     audio_out_jax = global_f5_pipeline(
         prompt=batched_text_list_combined,
@@ -279,7 +273,6 @@ def main(argv: Sequence[str]) -> None:
     """
     with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
         gr.Markdown("## F5 Text-to-Speech Synthesis")
-        #gr.Markdown(f"Enter reference text, upload reference audio, and provide the text you want to synthesize. Batch size will be automatically adjusted to fit buckets {BUCKET_SIZES} (max {MAX_CHUNKS} chunks).") # Updated description
 
         with gr.Row():
             with gr.Column():
