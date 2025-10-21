@@ -45,7 +45,9 @@ import html
 import re
 import qwix
 from maxdiffusion.utils.seq_utils import lens_to_mask
-import jax_vocos
+from maxdiffusion.models.vocos.vocos import Vocos
+from maxdiffusion.models.vocos.vocos_utils import load_vocos
+
 def basic_clean(text):
   if is_ftfy_available():
     import ftfy
@@ -69,6 +71,36 @@ def prompt_clean(text):
 def _add_sharding_rule(vs: nnx.VariableState, logical_axis_rules) -> nnx.VariableState:
   vs.sharding_rules = logical_axis_rules
   return vs
+
+def create_sharded_logical_vocos_vocoder(
+    devices_array: np.array, mesh: Mesh, rngs: nnx.Rngs, config: HyperParameters, restored_checkpoint=None
+):
+    def create_model(rngs: nnx.Rngs):
+        vocos_model = Vocos(
+            rngs=rngs,
+        )
+        return vocos_model
+    vocos_model = nnx.eval_shape(create_model, rngs=rngs)
+    graphdef, state, rest_of_state = nnx.split(vocos_model, nnx.Param, ...)
+
+    logical_state_spec = nnx.get_partition_spec(state)
+    logical_state_sharding = nn.logical_to_mesh_sharding(logical_state_spec, mesh, config.logical_axis_rules)
+    logical_state_sharding = dict(nnx.to_flat_state(logical_state_sharding))
+    params = state.to_pure_dict()
+    state = dict(nnx.to_flat_state(state))
+    
+    params = load_vocos(config.vocos_vocoder_pretrained_model_name_or_path, params, "cpu")
+    params = jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), params)
+    for path, val in flax.traverse_util.flatten_dict(params).items():
+        if restored_checkpoint:
+            path = path[:-1]
+        sharding = logical_state_sharding[path].value
+        state[path].value = device_put_replicated(val, sharding)
+    state = nnx.from_flat_state(state)
+    vocos_model = nnx.merge(graphdef, state, rest_of_state)
+
+
+    return vocos_model
 
 def create_sharded_logical_text_encoder(
     devices_array: np.array, mesh: Mesh, rngs: nnx.Rngs, config: HyperParameters, restored_checkpoint=None
@@ -218,7 +250,7 @@ class F5Pipeline:
       self,
       text_encoder: F5TextEmbedding,
       transformer: F5Transformer2DModel,
-      vocos_vocoder: jax_vocos.Vocos,
+      vocos_vocoder: Vocos,
       global_vocab_char_map: dict,
       devices_array: np.array,
       mesh: Mesh,
@@ -321,7 +353,9 @@ class F5Pipeline:
       cls, devices_array: np.array, mesh: Mesh, rngs: nnx.Rngs, config: HyperParameters, restored_checkpoint=None
   ):
     with mesh:
-      vocos_vocoder = jax_vocos.load_model(load_path=config.vocos_vocoder_pretrained_model_name_or_path)
+      vocos_vocoder = create_sharded_logical_vocos_vocoder(
+          devices_array=devices_array, mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
+      )
     return vocos_vocoder
 
   @classmethod

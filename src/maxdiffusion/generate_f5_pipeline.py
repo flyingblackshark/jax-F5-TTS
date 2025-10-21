@@ -15,6 +15,7 @@
 from typing import Sequence
 import time
 import jax
+import flax
 from maxdiffusion import pyconfig, max_logging, max_utils
 from absl import app
 import librosa
@@ -24,7 +25,8 @@ from maxdiffusion.utils.pinyin_utils import (
     convert_char_to_pinyin,
     list_str_to_idx,
 )
-
+import soundfile as sf
+import numpy as np
 jax.config.update("jax_use_shardy_partitioner", True)
 
 def run(config, pipeline=None, filename_prefix=""):
@@ -66,12 +68,11 @@ def run(config, pipeline=None, filename_prefix=""):
 
   audios = pipeline(
       prompt=batched_text_list,
-      reference_audio=["/home/fbs/jax-F5-TTS/test.mp3" for i in range(len(batched_text_list))],
+      reference_audio=ref_audio,
       duration=duration,
       max_sequence_length=2048,
   )
-  import soundfile as sf
-  import numpy as np
+
   res_cpu = np.asarray(audios)
   output_segment = res_cpu[0][ref_audio_len * 256 : batched_duration[0] * 256]
   for i in range(len(batched_duration)-1):
@@ -86,6 +87,7 @@ def run(config, pipeline=None, filename_prefix=""):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
+  flax.config.update('flax_always_shard_variable', False)
   run(pyconfig.config)
 
 

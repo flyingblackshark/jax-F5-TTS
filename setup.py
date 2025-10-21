@@ -128,7 +128,6 @@ _deps = [
     "jieba",
     "pypinyin",
     "librosa",
-    "jax_vocos",
     "filelock",
     "numpy",
     "regex",
