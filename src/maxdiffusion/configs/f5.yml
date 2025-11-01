@@ -25,11 +25,11 @@ log_period: 100
 
 vocoder_model_path: ''
 pretrained_model_name_or_path: ''
-f5_text_encoder_pretrained_model_name_or_path: '/home/fbs/jax-test/aurora_f5_text_encoder.safetensors'
-f5_transformer_pretrained_model_name_or_path: '/home/fbs/jax-test/aurora_f5_transformer.safetensors'
-vocos_vocoder_pretrained_model_name_or_path: '/home/fbs/jax-test/vocos.safetensors'
-vocab_name_or_path: '/home/fbs/jax-F5-TTS/vocab.txt'
-compiled_path: '/root/jax-F5-TTS/'
+f5_text_encoder_pretrained_model_name_or_path: '/bucket/f5/aurora_f5_text_encoder.safetensors'
+f5_transformer_pretrained_model_name_or_path: '/bucket/f5/aurora_f5_transformer.safetensors'
+vocos_vocoder_pretrained_model_name_or_path: '/bucket/f5/vocos.safetensors'
+vocab_name_or_path: '/bucket/f5/vocab.txt'
+compiled_path: ''
 use_ema: True
 
 # Flux params
