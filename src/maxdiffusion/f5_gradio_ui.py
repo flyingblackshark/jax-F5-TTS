@@ -267,12 +267,7 @@ def main(argv: Sequence[str]) -> None:
         return # Exit if setup fails
 
     # --- Create Gradio Interface ---
-    css = """
-    .audio-container { display: flex; justify-content: center; align-items: center; }
-    .transcription-container { margin-top: 10px; }
-    footer {visibility: hidden}
-    """
-    with gr.Blocks(css=css, theme=gr.themes.Soft()) as iface:
+    with gr.Blocks(theme=gr.themes.Soft()) as iface:
         gr.Markdown("## F5 Text-to-Speech Synthesis")
 
         with gr.Row():
