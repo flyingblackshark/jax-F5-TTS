@@ -267,7 +267,7 @@ def main(argv: Sequence[str]) -> None:
         return # Exit if setup fails
 
     # --- Create Gradio Interface ---
-    with gr.Blocks(theme=gr.themes.Soft()) as iface:
+    with gr.Blocks() as iface:
         gr.Markdown("## F5 Text-to-Speech Synthesis")
 
         with gr.Row():
