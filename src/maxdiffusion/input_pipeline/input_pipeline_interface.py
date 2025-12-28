@@ -40,6 +40,7 @@ from maxdiffusion.dreambooth.dreambooth_constants import (
 from PIL import Image
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def make_data_iterator(
@@ -50,8 +51,26 @@ def make_data_iterator(
     global_batch_size,
     tokenize_fn=None,
     image_transforms_fn=None,
+    feature_description=None,
+    prepare_sample_fn=None,
+    is_training=True,
 ):
   """Make data iterator for SD1, 2, XL, dataset_types in (hf, tf, tfrecord)"""
+
+  if config.dataset_type == "hf" or config.dataset_type == "tf":
+    if tokenize_fn is None or image_transforms_fn is None:
+      raise ValueError(f"dataset type {config.dataset_type} needs to pass a tokenize_fn and image_transforms_fn")
+
+  if (
+      config.dataset_type == "tfrecord"
+      and config.cache_latents_text_encoder_outputs
+      and feature_description is None
+      and prepare_sample_fn is None
+  ):
+    raise ValueError(
+        f"dataset type {config.dataset_type} needs to pass a feature_description dictionary and prepare_sample_fn function when cache_latents_text_encoder_outputs is True."
+    )
+
   if config.dataset_type == "hf":
     return _hf_data_processing.make_hf_streaming_iterator(
         config,
@@ -87,6 +106,9 @@ def make_data_iterator(
         dataloading_host_count,
         mesh,
         global_batch_size,
+        feature_description,
+        prepare_sample_fn,
+        is_training,
     )
   else:
     assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be in (tf, tfrecord, hf, grain)"
@@ -138,7 +160,7 @@ def make_dreambooth_train_iterator(config, mesh, global_batch_size, tokenizer, v
         function=tokenize_fn,
         batched=True,
         remove_columns=[INSTANCE_PROMPT_IDS],
-        num_proc=1,
+        num_proc=None,
         desc="Running tokenizer on instance dataset",
     )
     rng = jax.random.key(config.seed)
@@ -156,7 +178,7 @@ def make_dreambooth_train_iterator(config, mesh, global_batch_size, tokenizer, v
         function=transform_images_fn,
         batched=True,
         remove_columns=[INSTANCE_IMAGES],
-        num_proc=1,
+        num_proc=None,
         desc="Running vae on instance dataset",
     )
 
@@ -167,7 +189,7 @@ def make_dreambooth_train_iterator(config, mesh, global_batch_size, tokenizer, v
         function=tokenize_fn,
         batched=True,
         remove_columns=[CLASS_PROMPT_IDS],
-        num_proc=1,
+        num_proc=None,
         desc="Running tokenizer on class dataset",
     )
     transform_images_fn = partial(
@@ -183,7 +205,7 @@ def make_dreambooth_train_iterator(config, mesh, global_batch_size, tokenizer, v
         function=transform_images_fn,
         batched=True,
         remove_columns=[CLASS_IMAGES],
-        num_proc=1,
+        num_proc=None,
         desc="Running vae on instance dataset",
     )
 

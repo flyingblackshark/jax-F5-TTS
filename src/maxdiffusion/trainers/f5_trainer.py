@@ -132,37 +132,29 @@ class F5Trainer:
     return data_sharding
 
   def load_dataset(self, mesh, is_training=True):
-    # Stages of training as described in the F5 2.1 paper - https://arxiv.org/pdf/2503.20314
-    # Image pre-training - txt2img 256px
-    # Image-video joint training - stage 1. 256 px images and 192px 5 sec videos at fps=16
-    # Image-video joint training - stage 2. 480px images and 480px 5 sec videos at fps=16
-    # Image-video joint training - stage final. 720px images and 720px 5 sec videos at fps=16
-    # prompt embeds shape: (1, 512, 4096)
-    # For now, we will pass the same latents over and over
-    # TODO - create a dataset
     config = self.config
-    if config.dataset_type != "tfrecord" and not config.cache_latents_text_encoder_outputs:
-      raise ValueError(
-          "F5 2.1 training only supports config.dataset_type set to tfrecords and config.cache_latents_text_encoder_outputs set to True"
-      )
-    feature_description = {
-        "latents": tf.io.FixedLenFeature([], tf.string),
-        "encoder_hidden_states": tf.io.FixedLenFeature([], tf.string),
-    }
+    # if config.dataset_type != "tfrecord" and not config.cache_latents_text_encoder_outputs:
+    #   raise ValueError(
+    #       "F5 2.1 training only supports config.dataset_type set to tfrecords and config.cache_latents_text_encoder_outputs set to True"
+    #   )
+    # feature_description = {
+    #     "latents": tf.io.FixedLenFeature([], tf.string),
+    #     "encoder_hidden_states": tf.io.FixedLenFeature([], tf.string),
+    # }
 
-    if not is_training:
-      feature_description["timesteps"] = tf.io.FixedLenFeature([], tf.int64)
+    # if not is_training:
+    #   feature_description["timesteps"] = tf.io.FixedLenFeature([], tf.int64)
 
-    def prepare_sample_train(features):
-      latents = tf.io.parse_tensor(features["latents"], out_type=tf.float32)
-      encoder_hidden_states = tf.io.parse_tensor(features["encoder_hidden_states"], out_type=tf.float32)
-      return {"latents": latents, "encoder_hidden_states": encoder_hidden_states}
+    # def prepare_sample_train(features):
+    #   latents = tf.io.parse_tensor(features["latents"], out_type=tf.float32)
+    #   encoder_hidden_states = tf.io.parse_tensor(features["encoder_hidden_states"], out_type=tf.float32)
+    #   return {"latents": latents, "encoder_hidden_states": encoder_hidden_states}
 
-    def prepare_sample_eval(features):
-      latents = tf.io.parse_tensor(features["latents"], out_type=tf.float32)
-      encoder_hidden_states = tf.io.parse_tensor(features["encoder_hidden_states"], out_type=tf.float32)
-      timesteps = features["timesteps"]
-      return {"latents": latents, "encoder_hidden_states": encoder_hidden_states, "timesteps": timesteps}
+    # def prepare_sample_eval(features):
+    #   latents = tf.io.parse_tensor(features["latents"], out_type=tf.float32)
+    #   encoder_hidden_states = tf.io.parse_tensor(features["encoder_hidden_states"], out_type=tf.float32)
+    #   timesteps = features["timesteps"]
+    #   return {"latents": latents, "encoder_hidden_states": encoder_hidden_states, "timesteps": timesteps}
 
     data_iterator = make_data_iterator(
         config,
@@ -170,9 +162,9 @@ class F5Trainer:
         jax.process_count(),
         mesh,
         config.global_batch_size_to_load,
-        feature_description=feature_description,
-        prepare_sample_fn=prepare_sample_train if is_training else prepare_sample_eval,
-        is_training=is_training,
+        #feature_description=feature_description,
+        #prepare_sample_fn=prepare_sample_train if is_training else prepare_sample_eval,
+        #is_training=is_training,
     )
     return data_iterator
 
@@ -422,58 +414,58 @@ def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
   return new_state, scheduler_state, metrics, new_rng
 
 
-def eval_step(state, data, rng, scheduler_state, scheduler, config):
-  """
-  Computes the evaluation loss for a single batch without updating model weights.
-  """
+# def eval_step(state, data, rng, scheduler_state, scheduler, config):
+#   """
+#   Computes the evaluation loss for a single batch without updating model weights.
+#   """
 
-  # The loss function logic is identical to training. We are evaluating the model's
-  # ability to perform its core training objective (e.g., denoising).
-  @jax.jit
-  def loss_fn(params, latents, encoder_hidden_states, timesteps, rng):
-    # Reconstruct the model from its definition and parameters
-    model = nnx.merge(state.graphdef, params, state.rest_of_state)
+#   # The loss function logic is identical to training. We are evaluating the model's
+#   # ability to perform its core training objective (e.g., denoising).
+#   @jax.jit
+#   def loss_fn(params, latents, encoder_hidden_states, timesteps, rng):
+#     # Reconstruct the model from its definition and parameters
+#     model = nnx.merge(state.graphdef, params, state.rest_of_state)
 
-    noise = jax.random.normal(key=rng, shape=latents.shape, dtype=latents.dtype)
-    noisy_latents = scheduler.add_noise(scheduler_state, latents, noise, timesteps)
+#     noise = jax.random.normal(key=rng, shape=latents.shape, dtype=latents.dtype)
+#     noisy_latents = scheduler.add_noise(scheduler_state, latents, noise, timesteps)
 
-    # Get the model's prediction
-    model_pred = model(
-        hidden_states=noisy_latents,
-        timestep=timesteps,
-        encoder_hidden_states=encoder_hidden_states,
-        deterministic=True,
-    )
+#     # Get the model's prediction
+#     model_pred = model(
+#         hidden_states=noisy_latents,
+#         timestep=timesteps,
+#         encoder_hidden_states=encoder_hidden_states,
+#         deterministic=True,
+#     )
 
-    # Calculate the loss against the target
-    training_target = scheduler.training_target(latents, noise, timesteps)
-    training_weight = jnp.expand_dims(scheduler.training_weight(scheduler_state, timesteps), axis=(1, 2, 3, 4))
-    loss = (training_target - model_pred) ** 2
-    loss = loss * training_weight
-    # Calculate the mean loss per sample across all non-batch dimensions.
-    loss = loss.reshape(loss.shape[0], -1).mean(axis=1)
+#     # Calculate the loss against the target
+#     training_target = scheduler.training_target(latents, noise, timesteps)
+#     training_weight = jnp.expand_dims(scheduler.training_weight(scheduler_state, timesteps), axis=(1, 2, 3, 4))
+#     loss = (training_target - model_pred) ** 2
+#     loss = loss * training_weight
+#     # Calculate the mean loss per sample across all non-batch dimensions.
+#     loss = loss.reshape(loss.shape[0], -1).mean(axis=1)
 
-    return loss
+#     return loss
 
-  # --- Key Difference from train_step ---
-  # Directly compute the loss without calculating gradients.
-  # The model's state.params are used but not updated.
-  # TODO(coolkp): Explore optimizing the creation of PRNGs in a vmap or statically outside of the loop
-  bs = len(data["latents"])
-  single_batch_size = config.global_batch_size_to_train_on
-  losses = jnp.zeros(bs)
-  for i in range(0, bs, single_batch_size):
-    start = i
-    end = min(i + single_batch_size, bs)
-    latents = data["latents"][start:end, :].astype(config.weights_dtype)
-    encoder_hidden_states = data["encoder_hidden_states"][start:end, :].astype(config.weights_dtype)
-    timesteps = data["timesteps"][start:end].astype("int64")
-    _, new_rng = jax.random.split(rng, num=2)
-    loss = loss_fn(state.params, latents, encoder_hidden_states, timesteps, new_rng)
-    losses = losses.at[start:end].set(loss)
+#   # --- Key Difference from train_step ---
+#   # Directly compute the loss without calculating gradients.
+#   # The model's state.params are used but not updated.
+#   # TODO(coolkp): Explore optimizing the creation of PRNGs in a vmap or statically outside of the loop
+#   bs = len(data["latents"])
+#   single_batch_size = config.global_batch_size_to_train_on
+#   losses = jnp.zeros(bs)
+#   for i in range(0, bs, single_batch_size):
+#     start = i
+#     end = min(i + single_batch_size, bs)
+#     latents = data["latents"][start:end, :].astype(config.weights_dtype)
+#     encoder_hidden_states = data["encoder_hidden_states"][start:end, :].astype(config.weights_dtype)
+#     timesteps = data["timesteps"][start:end].astype("int64")
+#     _, new_rng = jax.random.split(rng, num=2)
+#     loss = loss_fn(state.params, latents, encoder_hidden_states, timesteps, new_rng)
+#     losses = losses.at[start:end].set(loss)
 
-  # Structure the metrics for logging and aggregation
-  metrics = {"scalar": {"learning/eval_loss": losses}}
+#   # Structure the metrics for logging and aggregation
+#   metrics = {"scalar": {"learning/eval_loss": losses}}
 
-  # Return the computed metrics and the new RNG key for the next eval step
-  return metrics, new_rng
+#   # Return the computed metrics and the new RNG key for the next eval step
+#   return metrics, new_rng
