@@ -168,6 +168,7 @@ def _tpu_flash_attention(
     query: jax.Array,
     key: jax.Array,
     value: jax.Array,
+    decoder_segment_ids: jax.Array,
     heads: int,
     mesh: Mesh,
     axis_names_q: AxisNames,
@@ -210,11 +211,11 @@ def _tpu_flash_attention(
   @functools.partial(
       shard_map.shard_map,
       mesh=mesh,
-      in_specs=(q_axis_names, kv_axis_names, kv_axis_names),
+      in_specs=(q_axis_names, kv_axis_names, kv_axis_names,None),
       out_specs=q_axis_names,
       check_rep=False,
   )
-  def wrap_flash_attention(query, key, value):
+  def wrap_flash_attention(query, key, value, decoder_segment_ids,):
 
     uses_fused_kernel = block_sizes.use_fused_bwd_kernel
     block_q_sizes = (
@@ -323,6 +324,7 @@ def _apply_attention_dot(
     query: Array,
     key: Array,
     value: Array,
+    decoder_segment_ids:Array,
     dtype: jnp.dtype,
     heads: int,
     dim_head: int,
@@ -428,6 +430,7 @@ def _apply_attention(
     query: Array,
     key: Array,
     value: Array,
+    decoder_segment_ids:Array,
     heads: int,
     dim_head: int,
     split_head_dim: bool,
@@ -459,13 +462,14 @@ def _apply_attention(
     can_use_flash_attention = True
   if attention_kernel == "dot_product" or use_memory_efficient_attention or not can_use_flash_attention:
     return _apply_attention_dot(
-        query, key, value, dtype, heads, dim_head, scale, split_head_dim, float32_qk_product, use_memory_efficient_attention
+        query, key, value, decoder_segment_ids, dtype, heads, dim_head, scale, split_head_dim, float32_qk_product, use_memory_efficient_attention
     )
   elif attention_kernel == "flash":
     return _tpu_flash_attention(
         query,
         key * scale,
         value,
+        decoder_segment_ids,
         heads,
         mesh,
         axis_names_q,
@@ -629,11 +633,12 @@ class NNXAttentionOp(nnx.Module):
     self.quant = quant
     self.residual_checkpoint_name = residual_checkpoint_name
 
-  def apply_attention(self, query: Array, key: Array, value: Array):
+  def apply_attention(self, query: Array, key: Array, value: Array,decoder_segment_ids:Array):
     return _apply_attention(
         query=query,
         key=key,
         value=value,
+        decoder_segment_ids=decoder_segment_ids,
         heads=self.heads,
         dim_head=self.dim_head,
         split_head_dim=self.split_head_dim,
