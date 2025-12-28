@@ -215,8 +215,8 @@ def _tpu_flash_attention(
       out_specs=q_axis_names,
       check_rep=False,
   )
-  def wrap_flash_attention(query, key, value, decoder_segment_ids,):
-
+  def wrap_flash_attention(query, key, value, decoder_segment_ids):
+    real_lens = jnp.sum((decoder_segment_ids>0).astype(jnp.int32),axis=-1).astype(jnp.bool)
     uses_fused_kernel = block_sizes.use_fused_bwd_kernel
     block_q_sizes = (
         block_sizes.block_q,
@@ -245,7 +245,7 @@ def _tpu_flash_attention(
 
     q_padded_len = query.shape[2]
     q_indices = jax.lax.broadcasted_iota(jnp.int32, (q_padded_len,), 0)
-    q_segment_ids = (q_indices < query_seq_len).astype(jnp.int32)
+    q_segment_ids = jnp.logical_and((q_indices < query_seq_len),(q_indices < real_lens)).astype(jnp.int32)
 
     kv_padded_len = key.shape[2]
     kv_indices = jax.lax.broadcasted_iota(jnp.int32, (kv_padded_len,), 0)
@@ -378,6 +378,16 @@ def _apply_attention_dot(
       attention_scores = jnp.einsum("b i d, b j d->b i j", query_states, key_states)
 
     attention_scores = attention_scores * scale
+
+    if decoder_segment_ids is not None:
+        # 假设 seq_len_query == seq_len_key == seq_len
+        mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]  # (batch_size, seq_len, seq_len)
+        if split_head_dim:
+            mask = mask[:, None, :, :]  # (batch_size, 1, seq_len, seq_len)
+        else:
+            mask = jnp.repeat(mask, heads, axis=0)  # (batch_size * heads, seq_len, seq_len)
+        attention_scores = jnp.where(mask, attention_scores, -1e9)
+
     attention_probs = nn.softmax(attention_scores, axis=-1 if split_head_dim else 2)
 
     attention_probs = attention_probs.astype(dtype)
