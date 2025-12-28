@@ -229,22 +229,6 @@ def create_sharded_logical_model(model, logical_axis_rules):
 
 
 class F5Pipeline:
-  r"""
-  Pipeline for text-to-video generation using Wan.
-
-  tokenizer ([`T5Tokenizer`]):
-      Tokenizer from [T5](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5Tokenizer),
-      specifically the [google/umt5-xxl](https://huggingface.co/google/umt5-xxl) variant.
-  text_encoder ([`T5EncoderModel`]):
-      [T5](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5EncoderModel), specifically
-      the [google/umt5-xxl](https://huggingface.co/google/umt5-xxl) variant.
-  transformer ([`WanModel`]):
-      Conditional Transformer to denoise the input latents.
-  scheduler ([`FlaxUniPCMultistepScheduler`]):
-      A scheduler to be used in combination with `transformer` to denoise the encoded image latents.
-  vae ([`AutoencoderKLWan`]):
-      Variational Auto-Encoder (VAE) Model to encode and decode videos to and from latent representations.
-  """
 
   def __init__(
       self,
@@ -362,6 +346,9 @@ class F5Pipeline:
   def from_checkpoint(cls, 
   config: HyperParameters, 
   restored_checkpoint=None, 
+  load_transformer=True,
+  load_text_encoder=True,
+  load_vocos_vocoder=True,
     ):
     devices_array = max_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
@@ -372,19 +359,19 @@ class F5Pipeline:
     text_encoder = None
     vocos_vocoder = None
     with mesh:
-      transformer = cls.load_transformer(
-          devices_array=devices_array, mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
-      )
-
-      text_encoder = cls.load_text_encoder(
-          devices_array=devices_array, mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
-      )
-      vocos_vocoder = cls.load_vocos_vocoder(
-          devices_array=devices_array, mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
-      )
-    global_vocab_char_map, _ = get_tokenizer(config.vocab_name_or_path, "custom")
-
-
+      if load_transformer:
+        transformer = cls.load_transformer(
+            devices_array=devices_array, mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
+        )
+      if load_text_encoder:
+        text_encoder = cls.load_text_encoder(
+            devices_array=devices_array, mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
+          )
+        global_vocab_char_map, _ = get_tokenizer(config.vocab_name_or_path, "custom")
+      if load_vocos_vocoder:
+        vocos_vocoder = cls.load_vocos_vocoder(
+            devices_array=devices_array, mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
+        )
     return F5Pipeline(
         text_encoder=text_encoder,
         transformer=transformer,

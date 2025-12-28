@@ -92,11 +92,12 @@ class F5Checkpointer(ABC):
 
     if restored_checkpoint:
       max_logging.log("Loading F5 pipeline from checkpoint")
-      pipeline = F5Pipeline.from_checkpoint(self.config, restored_checkpoint)
+      #pipeline = F5Pipeline.from_checkpoint(self.config, restored_checkpoint)
     else:
       max_logging.log("No checkpoint found, loading default pipeline.")
-      pipeline = F5Pipeline.from_checkpoint(self.config, None)
+      #pipeline = F5Pipeline.from_checkpoint(self.config, None)
       #pipeline = self.load_diffusers_checkpoint()
+    pipeline = F5Pipeline.from_checkpoint(self.config, restored_checkpoint)
 
     return pipeline
 
