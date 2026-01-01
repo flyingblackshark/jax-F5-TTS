@@ -36,3 +36,4 @@ rjieba
 pypinyin
 librosa
 qwix@git+https://github.com/google/qwix.git
+array-record

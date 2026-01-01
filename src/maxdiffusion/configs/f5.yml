@@ -231,7 +231,7 @@ remat_policy: "NONE"
 names_which_can_be_saved: []
 names_which_can_be_offloaded: []
 
-# checkpoint every number of samples, -1 means don't checkpoint.
+# checkpoint every number of sampoutput_dirles, -1 means don't checkpoint.
 checkpoint_every: -1
 checkpoint_dir: ""
 # enables one replica to read the ckpt then broadcast to the rest
@@ -246,7 +246,13 @@ max_train_steps: 200
 num_train_epochs: 1
 seed: 0
 output_dir: 'sdxl-model-finetuned'
-per_device_batch_size: 1
+per_device_batch_size: 1.0
+# If global_batch_size % jax.device_count is not 0, use FSDP sharding.
+global_batch_size: 0
+
+# For creating tfrecords from dataset
+grainrecords_dir: '/bucket/f5-mock-grainrecords'
+no_records_per_shard: 0
 
 warmup_steps_fraction: 0.0
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.

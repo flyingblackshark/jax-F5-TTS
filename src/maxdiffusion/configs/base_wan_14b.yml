@@ -28,6 +28,7 @@ save_config_to_gcs: False
 log_period: 100
 
 pretrained_model_name_or_path: 'Wan-AI/Wan2.1-T2V-14B-Diffusers'
+model_name: wan2.1
 
 # Overrides the transformer from pretrained_model_name_or_path
 wan_transformer_pretrained_model_name_or_path: ''
@@ -48,6 +49,8 @@ replicate_vae: False
 # fp32 activations and fp32 weights with HIGHEST will provide the best precision
 # at the cost of time.
 precision: "DEFAULT"
+# Use jax.lax.scan for transformer layers
+scan_layers: True
 
 # if False state is not jitted and instead replicate is called. This is good for debugging on single host
 # It must be True for multi-host.
@@ -57,18 +60,27 @@ jit_initializers: True
 from_pt: True
 split_head_dim: True
 attention: 'flash' # Supported attention: dot_product, flash, cudnn_flash_te, ring
-flash_min_seq_length: 4096
+flash_min_seq_length: 0
+
+# If mask_padding_tokens is True, we pass in segment ids to splash attention to avoid attending to padding tokens.
+# Else we do not pass in segment ids and on vpu bound hardware like trillium this is faster.
+# However, when padding tokens are significant, this will lead to worse quality and should be set to True.
+mask_padding_tokens: True 
+# Maxdiffusion has 2 types of attention sharding strategies:
+# 1. attention_sharding_uniform = True : same sequence sharding rules applied for q in both (self and cross attention)
+# 2. attention_sharding_uniform = False : Heads are sharded uniformly across devices for self attention while sequence is sharded
+#    in cross attention q.
+attention_sharding_uniform: True 
 dropout: 0.1
 
 flash_block_sizes: {
-  "block_q" : 1024,
-  "block_kv_compute" : 256,
-  "block_kv" : 1024,
-  "block_q_dkv" : 1024,
-  "block_kv_dkv" : 1024,
-  "block_kv_dkv_compute" : 256,
-  "block_q_dq" : 1024,
-  "block_kv_dq" : 1024
+  "block_q" : 2048,
+  "block_kv_compute" : 512,
+  "block_kv" : 2048,
+  "block_q_dkv" : 2048,
+  "block_kv_dkv" : 2048,
+  "block_kv_dkv_compute" : 512,
+  "use_fused_bwd_kernel": True
 }
 # Use on v6e
 # flash_block_sizes: {
@@ -77,9 +89,21 @@ flash_block_sizes: {
 #   "block_kv" : 2048,
 #   "block_q_dkv" : 3024,
 #   "block_kv_dkv" : 2048,
-#   "block_kv_dkv_compute" : 2048,
+#   "block_kv_dkv_compute" : 1024,
 #   "block_q_dq" : 3024,
-#   "block_kv_dq" : 2048
+#   "block_kv_dq" : 2048,
+#   "use_fused_bwd_kernel": False,
+# }
+# Use on v5p
+# flash_block_sizes: {
+#   "block_q" : 3024,
+#   "block_kv_compute" : 1024,
+#   "block_kv" : 2048,
+#   "block_q_dkv" : 1024,
+#   "block_kv_dkv" : 3072,
+#   "block_kv_dkv_compute" : 256,
+#   "block_q_dq" : 1024,
+#   "block_kv_dq" : 3072
 # }
 # GroupNorm groups
 norm_num_groups: 32
@@ -141,8 +165,9 @@ mesh_axes: ['data', 'fsdp', 'tensor']
 logical_axis_rules: [
                       ['batch', 'data'],
                       ['activation_batch', 'data'],
+                      ['activation_self_attn_heads', ['fsdp', 'tensor']], 
+                      ['activation_cross_attn_q_length', ['fsdp', 'tensor']],
                       ['activation_length', 'fsdp'],
-                      
                       ['activation_heads', 'tensor'],
                       ['mlp','tensor'],
                       ['embed','fsdp'],
@@ -234,9 +259,13 @@ global_batch_size: 0
 # For creating tfrecords from dataset
 tfrecords_dir: ''
 no_records_per_shard: 0
+enable_eval_timesteps: False
+timesteps_list: [125, 250, 375, 500, 625, 750, 875]
+num_eval_samples: 420
 
 warmup_steps_fraction: 0.1
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
+save_optimizer: False
 
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
@@ -254,6 +283,10 @@ enable_profiler: False
 skip_first_n_steps_for_profiler: 5
 profiler_steps: 10
 
+# Enable JAX named scopes for detailed profiling and debugging
+# When enabled, adds named scopes around key operations in transformer and attention layers
+enable_jax_named_scopes: False
+
 # Generation parameters
 prompt: "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy, with sunlight streaming through the window."
 prompt_2: "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy, with sunlight streaming through the window."
@@ -268,7 +301,7 @@ flow_shift: 3.0
 # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
 guidance_rescale: 0.0
 num_inference_steps: 30
-fps: 24
+fps: 16
 save_final_checkpoint: False
 
 # SDXL Lightning parameters
@@ -308,10 +341,16 @@ quantization: ''
 quantization_local_shard_count: -1
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
 use_qwix_quantization: False # Whether to use qwix for quantization. If set to True, the transformer of WAN will be quantized using qwix.
-# Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
-quantization_calibration_method: "absmax"
+# Quantization calibration method used for weights, activations and bwd. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
+weight_quantization_calibration_method: "absmax"
+act_quantization_calibration_method: "absmax"
+bwd_quantization_calibration_method: "absmax"
+qwix_module_path: ".*"
 
 # Eval model on per eval_every steps. -1 means don't eval.
 eval_every: -1
 eval_data_dir: ""
 enable_generate_video_for_eval: False # This will increase the used TPU memory.
+eval_max_number_of_samples_in_bucket: 60 # The number of samples per bucket for evaluation. This is calculated by num_eval_samples / len(timesteps_list).
+
+enable_ssim: False
