@@ -13,6 +13,16 @@
             "args": [
                 "src/maxdiffusion/configs/f5.yml"
             ]
+        },
+        {
+            "name": "Make F5 Mock Dataset",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "src/maxdiffusion/data_preprocessing/make_f5_mock_dataset.py",
+            "console": "integratedTerminal",
+            "args": [
+                "src/maxdiffusion/configs/f5.yml"
+            ]
         }
     ]
 }
