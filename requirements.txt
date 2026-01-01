@@ -32,7 +32,7 @@ sentencepiece
 aqtp
 hf_transfer>=0.1.9
 audax
-jieba
+rjieba
 pypinyin
 librosa
 qwix@git+https://github.com/google/qwix.git

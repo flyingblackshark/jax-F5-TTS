@@ -1,14 +1,11 @@
 from pypinyin import lazy_pinyin, Style
-import jieba
+import rjieba
 import os
 from importlib.resources import files
 import re
 import numpy as np
 from typing import Optional, Union,Tuple,List,Dict
 def convert_char_to_pinyin(text_list, polyphone=True):
-    if jieba.dt.initialized is False:
-        jieba.default_logger.setLevel(50)  # CRITICAL
-        jieba.initialize()
 
     final_text_list = []
     custom_trans = str.maketrans(
@@ -23,7 +20,7 @@ def convert_char_to_pinyin(text_list, polyphone=True):
     for text in text_list:
         char_list = []
         text = text.translate(custom_trans)
-        for seg in jieba.cut(text):
+        for seg in rjieba.cut(text):
             seg_byte_len = len(bytes(seg, "UTF-8"))
             if seg_byte_len == len(seg):  # if pure alphabets and symbols
                 if char_list and seg_byte_len > 1 and char_list[-1] not in " :'\"":

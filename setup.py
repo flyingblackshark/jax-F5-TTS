@@ -125,7 +125,7 @@ _deps = [
     "imageio-ffmpeg==0.6.0",
     "hf_transfer>=0.1.9",
     "audax",
-    "jieba",
+    "rjieba",
     "pypinyin",
     "librosa",
     "filelock",
