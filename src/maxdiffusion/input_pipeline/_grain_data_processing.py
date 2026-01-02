@@ -73,7 +73,7 @@ class ParseFeatures(grain.MapTransform):
     def _parse(example):
       features = pickle.loads(example)
       mel = features["mel"]
-      text = features["text"]
-      return {"mel": mel, "text": text}
+      txt_embed = features["txt_embed"]
+      return {"mel": mel, "txt_embed": txt_embed}
 
     return _parse(example)

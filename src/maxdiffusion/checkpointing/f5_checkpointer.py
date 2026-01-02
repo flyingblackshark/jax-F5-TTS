@@ -46,7 +46,7 @@ class F5Checkpointer(ABC):
         dataset_type=config.dataset_type,
     )
 
-  def _create_optimizer(self, config, learning_rate):
+  def _create_optimizer(self, model, config, learning_rate):
 
     learning_rate_scheduler = max_utils.create_learning_rate_schedule(
         learning_rate, config.learning_rate_schedule_steps, config.warmup_steps_fraction, config.max_train_steps

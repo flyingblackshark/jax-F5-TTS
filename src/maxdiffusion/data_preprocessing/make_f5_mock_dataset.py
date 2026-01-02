@@ -35,6 +35,16 @@ import jax
 import flax
 from maxdiffusion.utils.mel_util import get_mel
 from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
+import numpy as np
+from flax import nnx
+from maxdiffusion.utils.pinyin_utils import (
+    get_tokenizer,
+    chunk_text,
+    convert_char_to_pinyin,
+    list_str_to_idx,
+    prompt_clean,
+)
+
 
 
 def create_example(mel, txt_embed):
@@ -45,23 +55,45 @@ def create_example(mel, txt_embed):
 
   return pickle.dumps(feature)
 
+
+
 def mock_mel():
   max_sequence_length = 2048
   mock_audio = jax.random.normal(jax.random.PRNGKey(0), (1, 24000 * 10))
   mel = np.asarray(get_mel(mock_audio))
   return np.pad(mel,(0, max_sequence_length - mel.shape[0]),'constant')
 
-def txt2prompt(pipeline,txt):
-  txt_embed,_ = pipeline.encode_prompt(txt,max_sequence_length=2048)
+def encode_txt(pipeline,text_ids,text_ids_mask):
+  text_embed_cond  = pipeline.text_encoder(
+    text = text_ids,
+    text_decoder_segment_ids=text_ids_mask.astype(np.int32),
+  )
+
+def encode_prompt(
+    pipeline,
+    prompt: str,
+    max_sequence_length:int,
+    global_vocab_char_map
+):
+  prompt = prompt_clean(prompt)
+  pinyin_inputs = convert_char_to_pinyin(prompt)
+  
+  text_ids,text_ids_mask = list_str_to_idx(pinyin_inputs, global_vocab_char_map, max_length=max_sequence_length)
+
+  text_embed_cond = encode_txt(pipeline,text_ids,text_ids_mask)
+  return text_embed_cond
+def txt2prompt(pipeline,txt,global_vocab_char_map):
+
+  txt_embed = encode_prompt(pipeline,txt,max_sequence_length=2048,global_vocab_char_map=global_vocab_char_map)
   return np.asarray(txt_embed)
 
-def mock_text(pipeline):
+def mock_text(pipeline,global_vocab_char_map):
   mock_text = "abc123"
-  txt_embed = txt2prompt(pipeline,mock_text)
+  txt_embed = txt2prompt(pipeline,mock_text,global_vocab_char_map)
   return txt_embed
 
 def generate_dataset(config):
-    
+  global_vocab_char_map, _ = get_tokenizer(config.vocab_name_or_path, "custom")
   checkpoint_loader = F5Checkpointer(config, "F5_CHECKPOINT")
   pipeline,_,_ = checkpoint_loader.load_checkpoint()
 
@@ -81,7 +113,7 @@ def generate_dataset(config):
 
   for i in range(100):
     mel = mock_mel()
-    txt_embed = mock_text(pipeline)
+    txt_embed = mock_text(pipeline,global_vocab_char_map)
     # Write the example, including the timestep if applicable
     writer.write(create_example(mel, txt_embed))
     shard_record_count += 1

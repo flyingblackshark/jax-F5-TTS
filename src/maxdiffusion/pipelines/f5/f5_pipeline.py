@@ -36,36 +36,19 @@ from maxdiffusion.utils.pinyin_utils import (
     chunk_text,
     convert_char_to_pinyin,
     list_str_to_idx,
+    prompt_clean,
 )
 import librosa
 from maxdiffusion.utils.mel_util import get_mel
-from maxdiffusion.utils.import_utils import is_ftfy_available
+
 from maxdiffusion.maxdiffusion_utils import get_dummy_wan_inputs
-import html
-import re
+
 import qwix
 from maxdiffusion.utils.seq_utils import lens_to_mask
 from maxdiffusion.models.vocos.vocos import Vocos
 from maxdiffusion.models.vocos.vocos_utils import load_vocos
 
-def basic_clean(text):
-  if is_ftfy_available():
-    import ftfy
 
-    text = ftfy.fix_text(text)
-  text = html.unescape(html.unescape(text))
-  return text.strip()
-
-
-def whitespace_clean(text):
-  text = re.sub(r"\s+", " ", text)
-  text = text.strip()
-  return text
-
-
-def prompt_clean(text):
-  text = whitespace_clean(basic_clean(text))
-  return text
 
 
 def _add_sharding_rule(vs: nnx.VariableState, logical_axis_rules) -> nnx.VariableState:

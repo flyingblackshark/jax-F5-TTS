@@ -188,3 +188,4 @@ src/maxdiffusion/tests/stream_audio_assembler.py
 .gitignore
 src/maxdiffusion/tests/test_stream.py
 .kilocode/mcp.json
+test1/

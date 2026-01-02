@@ -490,19 +490,37 @@ def get_precision(config):
   return retval
 
 
+def value_or_none(flash_block_sizes, key):
+  if key in flash_block_sizes:
+    return flash_block_sizes[key]
+  else:
+    return None
+
+
 def get_flash_block_sizes(config):
   """Create custom flash attention BlockSizes."""
   flash_block_sizes = None
   if len(config.flash_block_sizes.keys()) > 0:
+    attention_is_tokamax = "tokamax" in config.attention
+    user_block_sizes:Dict[str, int] = config.flash_block_sizes
+    if attention_is_tokamax:
+      max_logging.log("Tokamax kernel specified, Note: Tokamax only supports fused backward kernel."
+                      "Hence following flash block properties specified will be ignored:"
+                      f"block_q: {user_block_sizes['block_q']},"
+                      f"block_q_dq: {user_block_sizes.get('block_q_dq')},"
+                      f"block_kv_dq: {user_block_sizes.get('block_kv_dq')},"
+                      f"use_fused_bwd_kernel: {user_block_sizes.get('use_fused_bwd_kernel')}"
+                      )
     flash_block_sizes = splash_attention_kernel.BlockSizes(
-        block_q=config.flash_block_sizes["block_q"],
-        block_kv_compute=config.flash_block_sizes["block_kv_compute"],
-        block_kv=config.flash_block_sizes["block_kv"],
-        block_q_dkv=config.flash_block_sizes["block_q_dkv"],
-        block_kv_dkv=config.flash_block_sizes["block_kv_dkv"],
-        block_kv_dkv_compute=config.flash_block_sizes["block_kv_dkv_compute"],
-        block_q_dq=config.flash_block_sizes["block_q_dq"],
-        block_kv_dq=config.flash_block_sizes["block_kv_dq"],
+        block_q=user_block_sizes.get("block_q_dkv", user_block_sizes["block_kv"]) if attention_is_tokamax else user_block_sizes["block_q"],
+        block_kv_compute=user_block_sizes["block_kv_compute"],
+        block_kv=user_block_sizes["block_kv"],
+        block_q_dkv=user_block_sizes["block_q_dkv"],
+        block_kv_dkv=user_block_sizes["block_kv_dkv"],
+        block_kv_dkv_compute=user_block_sizes["block_kv_dkv_compute"],
+        block_q_dq=None if attention_is_tokamax else value_or_none(user_block_sizes, "block_q_dq"),
+        block_kv_dq=None if attention_is_tokamax else value_or_none(user_block_sizes, "block_kv_dq"),
+        use_fused_bwd_kernel=True if attention_is_tokamax else value_or_none(user_block_sizes, "use_fused_bwd_kernel"),
     )
   return flash_block_sizes
 
@@ -520,6 +538,20 @@ def get_memory_allocations():
         f"device : {device.process_index},"
         f'bytes in use: {m_stats["bytes_in_use"] / gb} / {m_stats["bytes_limit"] / gb} GB'
     )
+
+
+def get_live_arrays():
+
+  backend = jax.extend.backend.get_backend()
+  live_arrays = backend.live_arrays()
+
+  max_logging.log(f"Total live arrays: {len(live_arrays)}\n")
+
+  for i, arr in enumerate(live_arrays):
+    max_logging.log(f"Array {i}:")
+    max_logging.log(f"  Shape: {arr.shape}")
+    max_logging.log(f"  Dtype: {arr.dtype}")
+    max_logging.log(f"  Devices: {arr.devices()}")
 
 
 # Taking inspiration from flax's https://flax.readthedocs.io/en/v0.5.3/_modules/flax/linen/summary.html#tabulate

@@ -5,6 +5,29 @@ from importlib.resources import files
 import re
 import numpy as np
 from typing import Optional, Union,Tuple,List,Dict
+from maxdiffusion.utils.import_utils import is_ftfy_available
+import html
+import re
+
+def basic_clean(text):
+  if is_ftfy_available():
+    import ftfy
+
+    text = ftfy.fix_text(text)
+  text = html.unescape(html.unescape(text))
+  return text.strip()
+
+
+def whitespace_clean(text):
+  text = re.sub(r"\s+", " ", text)
+  text = text.strip()
+  return text
+
+
+def prompt_clean(text):
+  text = whitespace_clean(basic_clean(text))
+  return text
+
 def convert_char_to_pinyin(text_list, polyphone=True):
 
     final_text_list = []
