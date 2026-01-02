@@ -31,12 +31,7 @@ from flax.linen import partitioning as nn_partitioning
 from maxdiffusion import max_utils, max_logging, train_utils
 from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
 from maxdiffusion.input_pipeline.input_pipeline_interface import (make_data_iterator)
-# from maxdiffusion.generate_F5 import run as generate_F5
-# from maxdiffusion.generate_F5 import inference_generate_video
 from maxdiffusion.train_utils import (_tensorboard_writer_worker, load_next_batch, _metrics_queue)
-from maxdiffusion.video_processor import VideoProcessor
-from maxdiffusion.utils import load_video
-from skimage.metrics import structural_similarity as ssim
 from flax.training import train_state
 from maxdiffusion.pipelines.f5.f5_pipeline import F5Pipeline
 from jax.experimental import multihost_utils
@@ -175,14 +170,6 @@ class F5Trainer:
     if opt_state and step:
       restore_args = {"opt_state": opt_state, "step": step}
       del opt_state
-    if self.config.enable_ssim:
-      # Generate a sample before training to compare against generated sample after training.
-      pretrained_video_path = generate_sample(self.config, pipeline, filename_prefix="pre-training-")
-
-    if self.config.eval_every == -1 or (not self.config.enable_generate_video_for_eval):
-      # save some memory.
-      del pipeline.vae
-      del pipeline.vae_cache
 
     mesh = pipeline.mesh
     train_data_iterator = self.load_dataset(mesh, is_training=True)

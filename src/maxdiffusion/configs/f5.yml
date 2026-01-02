@@ -268,7 +268,7 @@ global_batch_size: 0
 
 # For creating tfrecords from dataset
 grainrecords_dir: '/bucket/f5-mock-grainrecords'
-no_records_per_shard: 0
+no_records_per_shard: 50
 
 warmup_steps_fraction: 0.0
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.

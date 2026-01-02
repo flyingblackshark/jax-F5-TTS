@@ -250,7 +250,7 @@ def setup_models_and_state(config):
     from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
     global_config = config
     checkpoint_loader = F5Checkpointer(global_config, "F5_CHECKPOINT")
-    global_f5_pipeline = checkpoint_loader.load_checkpoint()
+    global_f5_pipeline,_,_ = checkpoint_loader.load_checkpoint()
 
 # --- Main Execution Logic ---
 def main(argv: Sequence[str]) -> None:

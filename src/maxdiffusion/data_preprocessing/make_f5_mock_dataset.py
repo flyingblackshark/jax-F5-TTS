@@ -32,11 +32,15 @@ import pickle
 from array_record.python import array_record_module
 import jax
 
+import flax
 from maxdiffusion.utils.mel_util import get_mel
-def create_example(mel, text):
+from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
+
+
+def create_example(mel, txt_embed):
   feature = {
       "mel": mel,
-      "text": text,
+      "txt_embed": txt_embed,
   }
 
   return pickle.dumps(feature)
@@ -44,12 +48,21 @@ def create_example(mel, text):
 def mock_mel():
   mock_audio = jax.random.normal(jax.random.PRNGKey(0), (1, 24000 * 10))
   return get_mel(mock_audio)
+  
+@jax.jit
+def txt2prompt(pipeline,txt):
+  txt_embed,_ = pipeline.encode_prompt(txt,max_sequence_length=2048)
+  return txt_embed
 
-def mock_text():
+def mock_text(pipeline):
   mock_text = "abc123"
-  return mock_text
+  txt_embed = txt2prompt(pipeline,mock_text)
+  return txt_embed
 
 def generate_dataset(config):
+    
+  checkpoint_loader = F5Checkpointer(config, "F5_CHECKPOINT")
+  pipeline,_,_ = checkpoint_loader.load_checkpoint()
 
   grainrecords_dir = config.grainrecords_dir
   if not os.path.exists(grainrecords_dir):
@@ -65,11 +78,11 @@ def generate_dataset(config):
   shard_record_count = 0
 
 
-  for i in range(10):
+  for i in range(100):
     mel = mock_mel()
-    text = mock_text()
+    txt_embed = mock_text(pipeline)
     # Write the example, including the timestep if applicable
-    writer.write(create_example(mel, text))
+    writer.write(create_example(mel, txt_embed))
     shard_record_count += 1
     global_record_count += 1
 
@@ -89,6 +102,7 @@ def run(config):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
+  flax.config.update('flax_always_shard_variable', False)
   run(pyconfig.config)
 
 
