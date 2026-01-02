@@ -63,17 +63,17 @@ def make_grain_iterator(
 class ParseFeatures(grain.MapTransform):
   """Parse serialized example"""
 
-  def __init__(self):
-    self.feature_description = {
-        "moments": tf.io.FixedLenFeature([], tf.string),
-        "clip_embeddings": tf.io.FixedLenFeature([], tf.string),
-    }
+  # def __init__(self):
+  #   self.feature_description = {
+  #       "moments": tf.io.FixedLenFeature([], tf.string),
+  #       "clip_embeddings": tf.io.FixedLenFeature([], tf.string),
+  #   }
 
   def map(self, example):
     def _parse(example):
-      features = tf.io.parse_single_example(example, self.feature_description)
-      moments = tf.io.parse_tensor(np.asarray(features["moments"]), out_type=tf.float32)
-      clip_embeddings = tf.io.parse_tensor(np.asarray(features["clip_embeddings"]), out_type=tf.float32)
-      return {"pixel_values": moments, "input_ids": clip_embeddings}
+      features = pickle.loads(example)
+      mel = features["mel"]
+      text = features["text"]
+      return {"mel": mel, "text": text}
 
     return _parse(example)

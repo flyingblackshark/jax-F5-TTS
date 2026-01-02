@@ -5,6 +5,16 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Test Train F5",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "src/maxdiffusion/train_f5.py",
+            "console": "integratedTerminal",
+            "args": [
+                "src/maxdiffusion/configs/f5.yml"
+            ]
+        },
+        {
             "name": "Test F5 Gradio",
             "type": "debugpy",
             "request": "launch",

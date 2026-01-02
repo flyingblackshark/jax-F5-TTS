@@ -43,11 +43,12 @@ else:
   _import_structure["scheduling_euler_discrete_flax"] = ["FlaxEulerDiscreteScheduler"]
   _import_structure["scheduling_ddpm_flax"] = ["FlaxDDPMScheduler"]
   _import_structure["scheduling_dpmsolver_multistep_flax"] = ["FlaxDPMSolverMultistepScheduler"]
-  _import_structure["scheduling_euler_discrete_flax"] = ["FlaxEulerDiscreteScheduler"]
+  _import_structure["scheduling_flow_match_flax"] = ["FlaxFlowMatchScheduler"]
   _import_structure["scheduling_karras_ve_flax"] = ["FlaxKarrasVeScheduler"]
   _import_structure["scheduling_lms_discrete_flax"] = ["FlaxLMSDiscreteScheduler"]
   _import_structure["scheduling_pndm_flax"] = ["FlaxPNDMScheduler"]
   _import_structure["scheduling_sde_ve_flax"] = ["FlaxScoreSdeVeScheduler"]
+  _import_structure["scheduling_flow_match_euler_discrete_flax"] = ["FlowMatchEulerDiscreteScheduler"]
   _import_structure["scheduling_utils_flax"] = [
       "FlaxKarrasDiffusionSchedulers",
       "FlaxSchedulerMixin",
@@ -69,10 +70,12 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     from .scheduling_ddpm_flax import FlaxDDPMScheduler
     from .scheduling_dpmsolver_multistep_flax import FlaxDPMSolverMultistepScheduler
     from .scheduling_euler_discrete_flax import FlaxEulerDiscreteScheduler
+    from .scheduling_flow_match_flax import FlowMatchScheduler
     from .scheduling_karras_ve_flax import FlaxKarrasVeScheduler
     from .scheduling_lms_discrete_flax import FlaxLMSDiscreteScheduler
     from .scheduling_pndm_flax import FlaxPNDMScheduler
     from .scheduling_sde_ve_flax import FlaxScoreSdeVeScheduler
+    from .scheduling_flow_match_euler_discrete_flax import FlowMatchEulerDiscreteScheduler
     from .scheduling_utils_flax import (
         FlaxKarrasDiffusionSchedulers,
         FlaxSchedulerMixin,

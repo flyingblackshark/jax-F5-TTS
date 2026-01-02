@@ -211,7 +211,7 @@ allow_split_physical_axes: False
 dataset_name: ''
 train_split: ''
 dataset_type: 'grain'
-grain_train_files: ''
+grain_train_files: '/bucket/f5-mock-grainrecords/*.array_record'
 # cache_latents_text_encoder_outputs only apply to dataset_type="tf",
 # only apply to small dataset that fits in memory
 # prepare image latents and text encoder outputs

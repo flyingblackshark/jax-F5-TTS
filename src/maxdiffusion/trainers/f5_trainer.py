@@ -285,12 +285,12 @@ class F5Trainer:
       max_logging.log(f"  Total train batch size (w. parallel & distributed) = {self.config.global_batch_size_to_train_on}")
       max_logging.log(f"  Total optimization steps = {self.config.max_train_steps}")
 
-    p_train_step = jax.jit(
-        functools.partial(train_step, scheduler=pipeline.scheduler, config=self.config),
-        in_shardings=(state_shardings, data_shardings, None, None),
-        out_shardings=(state_shardings, None, None, None),
-        donate_argnums=(0,),
-    )
+    # p_train_step = jax.jit(
+    #     functools.partial(train_step, scheduler=pipeline.scheduler, config=self.config),
+    #     in_shardings=(state_shardings, data_shardings, None, None),
+    #     out_shardings=(state_shardings, None, None, None),
+    #     donate_argnums=(0,),
+    # )
     # p_eval_step = jax.jit(
     #     functools.partial(eval_step, scheduler=pipeline.scheduler, config=self.config),
     #     in_shardings=(state_shardings, eval_data_shardings, None, None),
