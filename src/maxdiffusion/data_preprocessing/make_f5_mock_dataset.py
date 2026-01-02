@@ -46,13 +46,14 @@ def create_example(mel, txt_embed):
   return pickle.dumps(feature)
 
 def mock_mel():
+  max_sequence_length = 2048
   mock_audio = jax.random.normal(jax.random.PRNGKey(0), (1, 24000 * 10))
-  return get_mel(mock_audio)
-  
-@jax.jit
+  mel = np.asarray(get_mel(mock_audio))
+  return np.pad(mel,(0, max_sequence_length - mel.shape[0]),'constant')
+
 def txt2prompt(pipeline,txt):
   txt_embed,_ = pipeline.encode_prompt(txt,max_sequence_length=2048)
-  return txt_embed
+  return np.asarray(txt_embed)
 
 def mock_text(pipeline):
   mock_text = "abc123"
