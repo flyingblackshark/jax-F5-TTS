@@ -412,6 +412,7 @@ def _apply_attention_dot(
     query: Array,
     key: Array,
     value: Array,
+    decoder_segment_ids: Array,
     dtype: jnp.dtype,
     heads: int,
     dim_head: int,
@@ -463,6 +464,14 @@ def _apply_attention_dot(
       attention_scores = jnp.einsum("b t n h, b f n h -> b n f t", key_states, query_states)
     else:
       attention_scores = jnp.einsum("b i d, b j d->b i j", query_states, key_states)
+
+    if decoder_segment_ids is not None:
+      if split_head_dim:
+        bias = jnp.where(decoder_segment_ids[:, None, None, :] > 0, 0, -1e10)
+      else:
+        mask = jnp.repeat(decoder_segment_ids, heads, axis=0)
+        bias = jnp.where(mask[:, None, :] > 0, 0, -1e10)
+      attention_scores = attention_scores + bias.astype(attention_scores.dtype)
 
     attention_scores = attention_scores * scale
     attention_probs = nn.softmax(attention_scores, axis=-1 if split_head_dim else 2)
@@ -517,6 +526,7 @@ def _apply_attention(
     query: Array,
     key: Array,
     value: Array,
+    decoder_segment_ids: Array,
     heads: int,
     dim_head: int,
     split_head_dim: bool,
@@ -549,7 +559,7 @@ def _apply_attention(
     can_use_flash_attention = True
   if attention_kernel == "dot_product" or use_memory_efficient_attention or not can_use_flash_attention:
     return _apply_attention_dot(
-        query, key, value, dtype, heads, dim_head, scale, split_head_dim, float32_qk_product, use_memory_efficient_attention
+        query, key, value,decoder_segment_ids, dtype, heads, dim_head, scale, split_head_dim, float32_qk_product, use_memory_efficient_attention
     )
   elif attention_kernel in ["flash", "tokamax_flash"]:
     return _tpu_flash_attention(
@@ -725,11 +735,12 @@ class NNXAttentionOp(nnx.Module):
     self.mask_padding_tokens = mask_padding_tokens
     self.residual_checkpoint_name = residual_checkpoint_name
 
-  def apply_attention(self, query: Array, key: Array, value: Array):
+  def apply_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array):
     return _apply_attention(
         query=query,
         key=key,
         value=value,
+        decoder_segment_ids=decoder_segment_ids,
         heads=self.heads,
         dim_head=self.dim_head,
         split_head_dim=self.split_head_dim,
