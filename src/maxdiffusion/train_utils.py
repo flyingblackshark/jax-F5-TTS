@@ -17,13 +17,14 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
+import queue
 
 from maxdiffusion import max_utils, max_logging
+from contextlib import contextmanager
 
 
 def get_first_step(state):
-  with jax.spmd_mode("allow_all"):
-    return int(state.step)
+  return int(state.step)
 
 
 def load_next_batch(train_iter, example_batch, config):
@@ -69,8 +70,29 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   metrics["scalar"].update({"learning/current_learning_rate": lr})
 
 
+_metrics_queue = queue.Queue()
 _buffered_step = None
 _buffered_metrics = None
+
+
+def _tensorboard_writer_worker(writer, config):
+  """
+  A worker function that runs in a separate thread.
+  It waits for metrics to appear in the queue and writes them to TensorBoard.
+  """
+  while True:
+    data = _metrics_queue.get()
+    if data is None:
+      break
+    metrics, step = data
+    if jax.process_index() == 0:
+      for metric_name in metrics.get("scalar", []):
+        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
+      for metric_name in metrics.get("scalars", []):
+        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+
+      if step % config.log_period == 0:
+        writer.flush()
 
 
 def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config):
@@ -82,15 +104,17 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
   The logic is that this ensures that Jax is able to queues train_steps and we
   don't block when turning "lazy" Jax arrays into real Python numbers.
   """
-  global _buffered_step, _buffered_metrics
+  global _buffered_step, _buffered_metrics, _metrics_queue
 
+  if metrics:
+    _metrics_queue.put((metrics, step))
   if _buffered_metrics is not None:
+    if config.metrics_file:
+      max_utils.write_metrics_locally(_buffered_metrics, _buffered_step, config, local_metrics_file)
+
     if _buffered_step is None:
       raise ValueError(f"When writing metrics, {_buffered_step=} was none")
     write_metrics_to_tensorboard(writer, _buffered_metrics, _buffered_step, config)
-
-    if config.metrics_file:
-      max_utils.write_metrics_locally(_buffered_metrics, _buffered_step, config, local_metrics_file)
 
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(_buffered_metrics, _buffered_step, config, running_gcs_metrics)
@@ -101,27 +125,26 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
 
 def write_metrics_to_tensorboard(writer, metrics, step, config):
   """Writes metrics to tensorboard"""
-  with jax.spmd_mode("allow_all"):
-    if jax.process_index() == 0:
-      for metric_name in metrics.get("scalar", []):
-        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-      for metric_name in metrics.get("scalars", []):
-        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+  if jax.process_index() == 0:
+    max_logging.log(
+        "completed step: {}, seconds: {:.3f}, TFLOP/s/device: {:.3f}, loss: {:.3f}".format(
+            step,
+            metrics["scalar"]["perf/step_time_seconds"],
+            metrics["scalar"]["perf/per_device_tflops_per_sec"],
+            float(metrics["scalar"]["learning/loss"]),
+        )
+    )
+  if jax.process_index() == 0:
+    for metric_name in metrics.get("scalar", []):
+      writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
+    for metric_name in metrics.get("scalars", []):
+      writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
-    full_log = step % config.log_period == 0
-    if jax.process_index() == 0:
-      max_logging.log(
-          "completed step: {}, seconds: {:.3f}, TFLOP/s/device: {:.3f}, loss: {:.3f}".format(
-              step,
-              metrics["scalar"]["perf/step_time_seconds"],
-              metrics["scalar"]["perf/per_device_tflops_per_sec"],
-              float(metrics["scalar"]["learning/loss"]),
-          )
-      )
+  full_log = step % config.log_period == 0
 
-    if full_log and jax.process_index() == 0:
-      max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
-      writer.flush()
+  if full_log and jax.process_index() == 0:
+    max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
+    writer.flush()
 
 
 def get_params_to_save(params):
@@ -174,3 +197,22 @@ def generate_timestep_weights(config, num_timesteps):
   weights[bias_indices] *= timestep_bias_config["multiplier"]
   weights /= weights.sum()
   return jnp.array(weights)
+
+
+@contextmanager
+def transformer_engine_context():
+  """If TransformerEngine is available, this context manager will provide the library with MaxDiffusion-specific details needed for correcct operation."""
+  try:
+    from transformer_engine.jax.sharding import global_shard_guard, MeshResource
+    # Inform TransformerEngine of MaxDiffusion's physical mesh resources.
+    mesh_resource = MeshResource(
+        dp_resource="data",
+        tp_resource="tensor",
+        fsdp_resource="fsdp",
+        pp_resource=None,
+        cp_resource=None,
+    )
+    with global_shard_guard(mesh_resource):
+      yield
+  except ImportError:
+    yield

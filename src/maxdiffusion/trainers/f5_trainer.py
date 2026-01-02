@@ -31,8 +31,8 @@ from flax.linen import partitioning as nn_partitioning
 from maxdiffusion import max_utils, max_logging, train_utils
 from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
 from maxdiffusion.input_pipeline.input_pipeline_interface import (make_data_iterator)
-from maxdiffusion.generate_F5 import run as generate_F5
-from maxdiffusion.generate_F5 import inference_generate_video
+# from maxdiffusion.generate_F5 import run as generate_F5
+# from maxdiffusion.generate_F5 import inference_generate_video
 from maxdiffusion.train_utils import (_tensorboard_writer_worker, load_next_batch, _metrics_queue)
 from maxdiffusion.video_processor import VideoProcessor
 from maxdiffusion.utils import load_video
