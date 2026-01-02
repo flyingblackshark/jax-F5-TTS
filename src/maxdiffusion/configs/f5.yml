@@ -80,29 +80,46 @@ jit_initializers: True
 # Set true to load weights from pytorch
 from_pt: True
 split_head_dim: True
-attention: 'dot_product' # Supported attention: dot_product, flash, cudnn_flash_te
+attention: 'flash' # Supported attention: dot_product, flash, cudnn_flash_te, ring
 flash_min_seq_length: 4096
-flash_block_sizes: {}
-# Use the following flash_block_sizes on v6e (Trillium) due to larger vmem.
+# If mask_padding_tokens is True, we pass in segment ids to splash attention to avoid attending to padding tokens.
+# Else we do not pass in segment ids and on vpu bound hardware like trillium this is faster.
+# However, when padding tokens are significant, this will lead to worse quality and should be set to True.
+mask_padding_tokens: True 
+# Maxdiffusion has 2 types of attention sharding strategies:
+# 1. attention_sharding_uniform = True : same sequence sharding rules applied for q in both (self and cross attention)
+# 2. attention_sharding_uniform = False : Heads are sharded uniformly across devices for self attention while sequence is sharded
+#    in cross attention q.
+attention_sharding_uniform: True 
+dropout: 0.1
+
+flash_block_sizes: {
+  "block_q" : 1024,
+  "block_kv_compute" : 256,
+  "block_kv" : 1024,
+  "block_q_dkv" : 1024,
+  "block_kv_dkv" : 1024,
+  "block_kv_dkv_compute" : 256,
+  "block_q_dq" : 1024,
+  "block_kv_dq" : 1024
+}
+# Use on v6e
 # flash_block_sizes: {
-#   "block_q" : 1536,
-#   "block_kv_compute" : 1536,
-#   "block_kv" : 1536,
-#   "block_q_dkv" : 1536,
-#   "block_kv_dkv" : 1536,
-#   "block_kv_dkv_compute" : 1536,
-#   "block_q_dq" : 1536,
-#   "block_kv_dq" : 1536
+#   "block_q" : 3024,
+#   "block_kv_compute" : 1024,
+#   "block_kv" : 2048,
+#   "block_q_dkv" : 3024,
+#   "block_kv_dkv" : 2048,
+#   "block_kv_dkv_compute" : 2048,
+#   "block_q_dq" : 3024,
+#   "block_kv_dq" : 2048
+#   "use_fused_bwd_kernel": False,
 # }
 # GroupNorm groups
 norm_num_groups: 32
 
-# If train_new_unet, unet weights will be randomly initialized to train the unet from scratch
-# else they will be loaded from pretrained_model_name_or_path
-train_new_unet: False
-
 # train text_encoder - Currently not supported for SDXL
-train_text_encoder: True
+train_text_encoder: False
 text_encoder_learning_rate: 4.25e-6
 
 # https://arxiv.org/pdf/2305.08891.pdf
@@ -141,7 +158,6 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu'
 skip_jax_distributed_system: False
 
 # Parallelism
-# Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
 
 # batch : batch dimension of data and activations
@@ -158,12 +174,14 @@ mesh_axes: ['data', 'fsdp', 'tensor']
 # conv_out : conv.shape[-1] weight
 logical_axis_rules: [
                       ['batch', 'data'],
-                      ['activation_batch', ['data','fsdp']],
+                      ['activation_batch', 'data'],
+                      ['activation_length', 'fsdp'],
+                      
                       ['activation_heads', 'tensor'],
-                      ['activation_kv', 'tensor'],
                       ['mlp','tensor'],
                       ['embed','fsdp'],
                       ['heads', 'tensor'],
+                      ['norm', 'tensor'],
                       ['conv_batch', ['data','fsdp']],
                       ['out_channels', 'tensor'],
                       ['conv_out', 'fsdp'],
@@ -190,16 +208,16 @@ allow_split_physical_axes: False
 
 # Dataset
 # Replace with dataset path or train_data_dir. One has to be set.
-dataset_name: 'fbs0/aurora_ds'
-train_split: 'train'
-dataset_type: 'hf'
-cache_latents_text_encoder_outputs: False
+dataset_name: ''
+train_split: ''
+dataset_type: 'grain'
+grain_train_files: ''
 # cache_latents_text_encoder_outputs only apply to dataset_type="tf",
 # only apply to small dataset that fits in memory
 # prepare image latents and text encoder outputs
 # Reduce memory consumption and reduce step time during training
 # transformed dataset is saved at dataset_save_location
-dataset_save_location: '/tmp/pokemon-gpt4-captions_xl'
+dataset_save_location: ''
 train_data_dir: ''
 dataset_config_name: ''
 jax_cache_dir: ''
@@ -207,9 +225,7 @@ hf_data_dir: ''
 hf_train_files: ''
 hf_access_token: ''
 
-resolution: 1024
-center_crop: False
-random_flip: False
+
 # If cache_latents_text_encoder_outputs is True
 # the num_proc is set to 1
 tokenize_captions_num_proc: 4

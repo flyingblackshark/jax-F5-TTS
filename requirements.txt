@@ -37,3 +37,4 @@ pypinyin
 librosa
 qwix@git+https://github.com/google/qwix.git
 array-record
+tokamax>=0.0.4

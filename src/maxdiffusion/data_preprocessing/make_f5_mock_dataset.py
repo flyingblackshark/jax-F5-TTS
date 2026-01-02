@@ -30,6 +30,7 @@ import torch
 import tensorflow as tf
 import pickle
 from array_record.python import array_record_module
+import jax
 
 from maxdiffusion.utils.mel_util import get_mel
 def create_example(mel, text):
