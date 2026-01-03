@@ -118,12 +118,12 @@ class F5Trainer:
 
   def get_data_shardings(self, mesh):
     data_sharding = jax.sharding.NamedSharding(mesh, P(*self.config.data_sharding))
-    data_sharding = {"latents": data_sharding, "encoder_hidden_states": data_sharding}
+    data_sharding = {"mel": data_sharding, "txt_embed": data_sharding}
     return data_sharding
 
   def get_eval_data_shardings(self, mesh):
     data_sharding = jax.sharding.NamedSharding(mesh, P(*self.config.data_sharding))
-    data_sharding = {"latents": data_sharding, "encoder_hidden_states": data_sharding, "timesteps": data_sharding}
+    data_sharding = {"mel": data_sharding, "txt_embed": data_sharding, "timesteps": data_sharding}
     return data_sharding
 
   def load_dataset(self, mesh, is_training=True):
@@ -272,12 +272,12 @@ class F5Trainer:
       max_logging.log(f"  Total train batch size (w. parallel & distributed) = {self.config.global_batch_size_to_train_on}")
       max_logging.log(f"  Total optimization steps = {self.config.max_train_steps}")
 
-    # p_train_step = jax.jit(
-    #     functools.partial(train_step, scheduler=pipeline.scheduler, config=self.config),
-    #     in_shardings=(state_shardings, data_shardings, None, None),
-    #     out_shardings=(state_shardings, None, None, None),
-    #     donate_argnums=(0,),
-    # )
+    p_train_step = jax.jit(
+        functools.partial(train_step, scheduler=pipeline.scheduler, config=self.config),
+        in_shardings=(state_shardings, data_shardings, None, None),
+        out_shardings=(state_shardings, None, None, None),
+        donate_argnums=(0,),
+    )
     # p_eval_step = jax.jit(
     #     functools.partial(eval_step, scheduler=pipeline.scheduler, config=self.config),
     #     in_shardings=(state_shardings, eval_data_shardings, None, None),
@@ -366,22 +366,26 @@ def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
 
   def loss_fn(params):
     model = nnx.merge(state.graphdef, params, state.rest_of_state)
-    latents = data["latents"].astype(config.weights_dtype)
-    encoder_hidden_states = data["encoder_hidden_states"].astype(config.weights_dtype)
-    bsz = latents.shape[0]
+    mel = data["mel"].astype(config.weights_dtype)
+    txt_embed = data["txt_embed"].astype(config.weights_dtype)
+    bsz = mel.shape[0]
     timesteps = jax.random.randint(
         timestep_rng,
         (bsz,),
         0,
         scheduler.config.num_train_timesteps,
     )
-    noise = jax.random.normal(key=new_rng, shape=latents.shape, dtype=latents.dtype)
-    noisy_latents = scheduler.add_noise(scheduler_state, latents, noise, timesteps)
+    noise = jax.random.normal(key=new_rng, shape=mel.shape, dtype=mel.dtype)
+    noisy_latents = scheduler.add_noise(scheduler_state, mel, noise, timesteps)
 
+    cond = mel
+    #cond = jnp.where(rand_span_mask[..., None], jnp.zeros_like(mel), mel)
     model_pred = model(
-        hidden_states=noisy_latents,
+        x=noisy_latents,
+        cond=cond,
         timestep=timesteps,
-        encoder_hidden_states=encoder_hidden_states,
+        text_embed=txt_embed,
+        decoder_segment_ids=jnp.ones((bsz,noisy_latents.shape[1])),
         deterministic=False,
         rngs=nnx.Rngs(dropout_rng),
     )
