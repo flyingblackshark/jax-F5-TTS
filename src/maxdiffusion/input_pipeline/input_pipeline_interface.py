@@ -57,61 +57,61 @@ def make_data_iterator(
 ):
   """Make data iterator for SD1, 2, XL, dataset_types in (hf, tf, tfrecord)"""
 
-  # if config.dataset_type == "hf" or config.dataset_type == "tf":
-  #   if tokenize_fn is None or image_transforms_fn is None:
-  #     raise ValueError(f"dataset type {config.dataset_type} needs to pass a tokenize_fn and image_transforms_fn")
+#   if config.dataset_type == "hf" or config.dataset_type == "tf":
+#     if tokenize_fn is None or image_transforms_fn is None:
+#       raise ValueError(f"dataset type {config.dataset_type} needs to pass a tokenize_fn and image_transforms_fn")
 
-  # if (
-  #     config.dataset_type == "tfrecord"
-  #     and config.cache_latents_text_encoder_outputs
-  #     and feature_description is None
-  #     and prepare_sample_fn is None
-  # ):
-  #   raise ValueError(
-  #       f"dataset type {config.dataset_type} needs to pass a feature_description dictionary and prepare_sample_fn function when cache_latents_text_encoder_outputs is True."
-  #   )
+#   if (
+#       config.dataset_type == "tfrecord"
+#       and config.cache_latents_text_encoder_outputs
+#       and feature_description is None
+#       and prepare_sample_fn is None
+#   ):
+#     raise ValueError(
+#         f"dataset type {config.dataset_type} needs to pass a feature_description dictionary and prepare_sample_fn function when cache_latents_text_encoder_outputs is True."
+#     )
 
-  # if config.dataset_type == "hf":
-  #   return _hf_data_processing.make_hf_streaming_iterator(
-  #       config,
-  #       dataloading_host_index,
-  #       dataloading_host_count,
-  #       mesh,
-  #       global_batch_size,
-  #       tokenize_fn=tokenize_fn,
-  #       image_transforms_fn=image_transforms_fn,
-  #   )
-  # elif config.dataset_type == "grain":
-  return _grain_data_processing.make_grain_iterator(
-      config,
-      dataloading_host_index,
-      dataloading_host_count,
-      mesh,
-      global_batch_size,
-  )
-  # elif config.dataset_type == "tf":
-  #   return _tfds_data_processing.make_tf_iterator(
-  #       config,
-  #       dataloading_host_index,
-  #       dataloading_host_count,
-  #       mesh,
-  #       global_batch_size,
-  #       tokenize_fn=tokenize_fn,
-  #       image_transforms_fn=image_transforms_fn,
-  #   )
-  # elif config.dataset_type == "tfrecord":
-  #   return _tfds_data_processing.make_tfrecord_iterator(
-  #       config,
-  #       dataloading_host_index,
-  #       dataloading_host_count,
-  #       mesh,
-  #       global_batch_size,
-  #       feature_description,
-  #       prepare_sample_fn,
-  #       is_training,
-  #   )
-  # else:
-  #   assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be in (tf, tfrecord, hf, grain)"
+#   if config.dataset_type == "hf":
+#     return _hf_data_processing.make_hf_streaming_iterator(
+#         config,
+#         dataloading_host_index,
+#         dataloading_host_count,
+#         mesh,
+#         global_batch_size,
+#         tokenize_fn=tokenize_fn,
+#         image_transforms_fn=image_transforms_fn,
+#     )
+#   elif config.dataset_type == "grain":
+#     return _grain_data_processing.make_grain_iterator(
+#         config,
+#         dataloading_host_index,
+#         dataloading_host_count,
+#         mesh,
+#         global_batch_size,
+#     )
+#   elif config.dataset_type == "tf":
+#     return _tfds_data_processing.make_tf_iterator(
+#         config,
+#         dataloading_host_index,
+#         dataloading_host_count,
+#         mesh,
+#         global_batch_size,
+#         tokenize_fn=tokenize_fn,
+#         image_transforms_fn=image_transforms_fn,
+#     )
+#   elif config.dataset_type == "tfrecord":
+  return _tfds_data_processing.make_tfrecord_iterator(
+        config,
+        dataloading_host_index,
+        dataloading_host_count,
+        mesh,
+        global_batch_size,
+        feature_description,
+        prepare_sample_fn,
+        is_training,
+    )
+#   else:
+#     assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be in (tf, tfrecord, hf, grain)"
 
 
 def make_dreambooth_train_iterator(config, mesh, global_batch_size, tokenizer, vae, vae_params):

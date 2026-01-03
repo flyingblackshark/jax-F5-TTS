@@ -128,22 +128,22 @@ class F5Trainer:
 
   def load_dataset(self, mesh, is_training=True):
     config = self.config
-    # if config.dataset_type != "tfrecord" and not config.cache_latents_text_encoder_outputs:
-    #   raise ValueError(
-    #       "F5 2.1 training only supports config.dataset_type set to tfrecords and config.cache_latents_text_encoder_outputs set to True"
-    #   )
-    # feature_description = {
-    #     "latents": tf.io.FixedLenFeature([], tf.string),
-    #     "encoder_hidden_states": tf.io.FixedLenFeature([], tf.string),
-    # }
+    if config.dataset_type != "tfrecord":
+      raise ValueError(
+          "F5 v1 training only supports config.dataset_type set to tfrecords"
+      )
+    feature_description = {
+        "mel": tf.io.FixedLenFeature([], tf.string),
+        "txt_embed": tf.io.FixedLenFeature([], tf.string),
+    }
 
-    # if not is_training:
-    #   feature_description["timesteps"] = tf.io.FixedLenFeature([], tf.int64)
+    if not is_training:
+      feature_description["timesteps"] = tf.io.FixedLenFeature([], tf.int64)
 
-    # def prepare_sample_train(features):
-    #   latents = tf.io.parse_tensor(features["latents"], out_type=tf.float32)
-    #   encoder_hidden_states = tf.io.parse_tensor(features["encoder_hidden_states"], out_type=tf.float32)
-    #   return {"latents": latents, "encoder_hidden_states": encoder_hidden_states}
+    def prepare_sample_train(features):
+      mel = tf.io.parse_tensor(features["mel"], out_type=tf.float32)
+      txt_embed = tf.io.parse_tensor(features["txt_embed"], out_type=tf.float32)
+      return {"mel": mel, "txt_embed": txt_embed}
 
     # def prepare_sample_eval(features):
     #   latents = tf.io.parse_tensor(features["latents"], out_type=tf.float32)
@@ -157,9 +157,9 @@ class F5Trainer:
         jax.process_count(),
         mesh,
         config.global_batch_size_to_load,
-        #feature_description=feature_description,
-        #prepare_sample_fn=prepare_sample_train if is_training else prepare_sample_eval,
-        #is_training=is_training,
+        feature_description=feature_description,
+        prepare_sample_fn=prepare_sample_train,
+        is_training=is_training,
     )
     return data_iterator
 
@@ -303,37 +303,37 @@ class F5Trainer:
     scheduler_state = pipeline.scheduler_state
     example_batch = load_next_batch(train_data_iterator, None, self.config)
 
-    #with ThreadPoolExecutor(max_workers=1) as executor:
-    for step in np.arange(start_step, self.config.max_train_steps):
-      if self.config.enable_profiler and step == first_profiling_step:
-        max_utils.activate_profiler(self.config)
-      start_step_time = datetime.datetime.now()
-      #next_batch_future = executor.submit(load_next_batch, train_data_iterator, example_batch, self.config)
-      with jax.profiler.StepTraceAnnotation("train", step_num=step), pipeline.mesh, nn_partitioning.axis_rules(
-          self.config.logical_axis_rules
-      ):
-        state, scheduler_state, train_metric, rng = p_train_step(state, example_batch, rng, scheduler_state)
-        train_metric["scalar"]["learning/loss"].block_until_ready()
-      last_step_completion = datetime.datetime.now()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+      for step in np.arange(start_step, self.config.max_train_steps):
+        if self.config.enable_profiler and step == first_profiling_step:
+          max_utils.activate_profiler(self.config)
+        start_step_time = datetime.datetime.now()
+        next_batch_future = executor.submit(load_next_batch, train_data_iterator, example_batch, self.config)
+        with jax.profiler.StepTraceAnnotation("train", step_num=step), pipeline.mesh, nn_partitioning.axis_rules(
+            self.config.logical_axis_rules
+        ):
+          state, scheduler_state, train_metric, rng = p_train_step(state, example_batch, rng, scheduler_state)
+          train_metric["scalar"]["learning/loss"].block_until_ready()
+        last_step_completion = datetime.datetime.now()
 
-      if self.config.enable_profiler and step == last_profiling_step:
-        max_utils.deactivate_profiler(self.config)
+        if self.config.enable_profiler and step == last_profiling_step:
+          max_utils.deactivate_profiler(self.config)
 
-      # train_utils.record_scalar_metrics(
-      #     train_metric, last_step_completion - start_step_time, per_device_tflops, learning_rate_scheduler(step)
-      # )
-      # if self.config.write_metrics:
-      #   train_utils.write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
+        # train_utils.record_scalar_metrics(
+        #     train_metric, last_step_completion - start_step_time, per_device_tflops, learning_rate_scheduler(step)
+        # )
+        # if self.config.write_metrics:
+        #   train_utils.write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
 
-      # if self.config.eval_every > 0 and (step + 1) % self.config.eval_every == 0:
-      #   if self.config.enable_generate_video_for_eval:
-      #     pipeline.transformer = nnx.merge(state.graphdef, state.params, state.rest_of_state)
-      #     inference_generate_video(self.config, pipeline, filename_prefix=f"{step+1}-train_steps-")
-      #   # Re-create the iterator each time you start evaluation to reset it
-      #   # This assumes your data loading logic can be called to get a fresh iterator.
-      #   self.eval(mesh, eval_rng_key, step, p_eval_step, state, scheduler_state, writer)
+        # if self.config.eval_every > 0 and (step + 1) % self.config.eval_every == 0:
+        #   if self.config.enable_generate_video_for_eval:
+        #     pipeline.transformer = nnx.merge(state.graphdef, state.params, state.rest_of_state)
+        #     inference_generate_video(self.config, pipeline, filename_prefix=f"{step+1}-train_steps-")
+        #   # Re-create the iterator each time you start evaluation to reset it
+        #   # This assumes your data loading logic can be called to get a fresh iterator.
+        #   self.eval(mesh, eval_rng_key, step, p_eval_step, state, scheduler_state, writer)
 
-      example_batch = load_next_batch()
+      example_batch = next_batch_future.result()
       if step != 0 and self.config.checkpoint_every != -1 and step % self.config.checkpoint_every == 0:
         max_logging.log(f"Saving checkpoint for step {step}")
         if self.config.save_optimizer:

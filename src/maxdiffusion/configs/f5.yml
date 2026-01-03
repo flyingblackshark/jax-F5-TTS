@@ -210,15 +210,16 @@ allow_split_physical_axes: False
 # Replace with dataset path or train_data_dir. One has to be set.
 dataset_name: ''
 train_split: ''
-dataset_type: 'tfrecords'
-grain_train_files: '/bucket/f5-mock-grainrecords/*.array_record'
+dataset_type: 'tfrecord'
+cache_latents_text_encoder_outputs: True
 # cache_latents_text_encoder_outputs only apply to dataset_type="tf",
 # only apply to small dataset that fits in memory
 # prepare image latents and text encoder outputs
 # Reduce memory consumption and reduce step time during training
 # transformed dataset is saved at dataset_save_location
-dataset_save_location: ''
-train_data_dir: ''
+dataset_save_location: 'gs://fbs-use5/f5-mock-tfrecords'
+load_tfrecord_cached: True
+train_data_dir: 'gs://fbs-use5/f5-mock-tfrecords'
 dataset_config_name: ''
 jax_cache_dir: ''
 hf_data_dir: ''
