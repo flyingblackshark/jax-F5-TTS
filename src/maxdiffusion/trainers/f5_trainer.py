@@ -257,14 +257,14 @@ class F5Trainer:
     data_shardings = self.get_data_shardings(mesh)
     eval_data_shardings = self.get_eval_data_shardings(mesh)
 
-    writer = max_utils.initialize_summary_writer(self.config)
-    writer_thread = threading.Thread(target=_tensorboard_writer_worker, args=(writer, self.config), daemon=True)
-    writer_thread.start()
+    # writer = max_utils.initialize_summary_writer(self.config)
+    # writer_thread = threading.Thread(target=_tensorboard_writer_worker, args=(writer, self.config), daemon=True)
+    # writer_thread.start()
 
-    num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-    max_utils.add_text_to_summary_writer("number_model_parameters", str(num_model_parameters), writer)
-    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ.get("LIBTPU_INIT_ARGS", ""), writer)
-    max_utils.add_config_to_summary_writer(self.config, writer)
+    # num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
+    # max_utils.add_text_to_summary_writer("number_model_parameters", str(num_model_parameters), writer)
+    # max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ.get("LIBTPU_INIT_ARGS", ""), writer)
+    # max_utils.add_config_to_summary_writer(self.config, writer)
 
     if jax.process_index() == 0:
       max_logging.log("***** Running training *****")
@@ -322,8 +322,8 @@ class F5Trainer:
       # train_utils.record_scalar_metrics(
       #     train_metric, last_step_completion - start_step_time, per_device_tflops, learning_rate_scheduler(step)
       # )
-      if self.config.write_metrics:
-        train_utils.write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
+      # if self.config.write_metrics:
+      #   train_utils.write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
 
       # if self.config.eval_every > 0 and (step + 1) % self.config.eval_every == 0:
       #   if self.config.enable_generate_video_for_eval:
@@ -341,17 +341,17 @@ class F5Trainer:
         else:
           self.checkpointer.save_checkpoint(step, pipeline, state.params)
 
-      _metrics_queue.put(None)
-      writer_thread.join()
-      if writer:
-        writer.flush()
-      if self.config.save_final_checkpoint:
-        max_logging.log(f"Saving final checkpoint for step {step}")
-        self.checkpointer.save_checkpoint(self.config.max_train_steps - 1, pipeline, state.params)
-        self.checkpointer.checkpoint_manager.wait_until_finished()
-      # load new state for trained tranformer
-      pipeline.transformer = nnx.merge(state.graphdef, state.params, state.rest_of_state)
-      return pipeline
+    _metrics_queue.put(None)
+    writer_thread.join()
+    if writer:
+      writer.flush()
+    if self.config.save_final_checkpoint:
+      max_logging.log(f"Saving final checkpoint for step {step}")
+      self.checkpointer.save_checkpoint(self.config.max_train_steps - 1, pipeline, state.params)
+      self.checkpointer.checkpoint_manager.wait_until_finished()
+    # load new state for trained tranformer
+    pipeline.transformer = nnx.merge(state.graphdef, state.params, state.rest_of_state)
+    return pipeline
 
 
 def train_step(state, data, rng, scheduler_state, scheduler, config):

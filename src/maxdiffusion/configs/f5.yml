@@ -210,9 +210,8 @@ allow_split_physical_axes: False
 # Replace with dataset path or train_data_dir. One has to be set.
 dataset_name: ''
 train_split: ''
-dataset_type: 'grain'
+dataset_type: 'tfrecords'
 grain_train_files: '/bucket/f5-mock-grainrecords/*.array_record'
-grain_worker_count: 1
 # cache_latents_text_encoder_outputs only apply to dataset_type="tf",
 # only apply to small dataset that fits in memory
 # prepare image latents and text encoder outputs
@@ -268,7 +267,7 @@ per_device_batch_size: 1.0
 global_batch_size: 0
 
 # For creating tfrecords from dataset
-grainrecords_dir: '/bucket/f5-mock-grainrecords'
+tfrecords_dir: 'gs://fbs-use5/f5-mock-tfrecords'
 no_records_per_shard: 0
 
 warmup_steps_fraction: 0.0
