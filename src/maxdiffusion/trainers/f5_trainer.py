@@ -67,50 +67,39 @@ class F5Trainer:
 
   @staticmethod
   def calculate_tflops(pipeline):
-
-    maxdiffusion_config = pipeline.config
+    """Calculates TFLOPs for F5 model."""
+    config = pipeline.config
+    
     # Model configuration
-    height = pipeline.config.height
-    width = pipeline.config.width
-    num_frames = pipeline.config.num_frames
-
-    # Transformer dimensions
-    transformer_config = pipeline.transformer.config
-    num_layers = transformer_config.num_layers
-    heads = pipeline.transformer.config.num_attention_heads
-    head_dim = pipeline.transformer.config.attention_head_dim
-    ffn_dim = transformer_config.ffn_dim
-    seq_len = int(((height / 8) * (width / 8) * ((num_frames - 1) // pipeline.vae_scale_factor_temporal + 1)) / 4)
-    text_encoder_dim = 512
-    # Attention FLOPS
-    # Self
-    self_attn_qkv_proj_flops = 3 * (2 * seq_len * (heads * head_dim) ** 2)
-    self_attn_qk_v_flops = 2 * (2 * seq_len**2 * (heads * head_dim))
-    # Cross
-    cross_attn_kv_proj_flops = 3 * (2 * text_encoder_dim * (heads * head_dim) ** 2)
-    cross_attn_q_proj_flops = 1 * (2 * seq_len * (heads * head_dim) ** 2)
-    cross_attention_qk_v_flops = 2 * (2 * seq_len * text_encoder_dim * (heads * head_dim))
-
-    # Output_projection from attention
-    attn_output_proj_flops = 2 * (2 * seq_len * (heads * head_dim) ** 2)
-
-    total_attn_flops = (
-        self_attn_qkv_proj_flops
-        + self_attn_qk_v_flops
-        + cross_attn_kv_proj_flops
-        + cross_attn_q_proj_flops
-        + cross_attention_qk_v_flops
-        + attn_output_proj_flops
-    )
-
-    # FFN
-    ffn_flops = 2 * (2 * seq_len * (heads * head_dim) * ffn_dim)
-
-    flops_per_block = total_attn_flops + ffn_flops
-
+    # F5 uses concatenated inputs (latents + cond + text_embed), all padded/truncated to max_sequence_length
+    seq_len = config.max_sequence_length
+    dim = config.latent_dim
+    num_heads = config.num_heads
+    head_dim = config.head_dim
+    mlp_ratio = config.mlp_ratio
+    num_layers = config.num_depth
+    
+    # Self Attention FLOPs
+    # QKV Projections: 3 * (2 * L * D * D) = 6 * L * D^2
+    # Attention Score (Q * K^T): 2 * L^2 * D
+    # Attention Weighted Sum (Score * V): 2 * L^2 * D
+    # Output Projection: 2 * L * D * D = 2 * L * D^2
+    # Total Attn = 8 * L * D^2 + 4 * L^2 * D
+    
+    total_attn_flops = 8 * seq_len * dim**2 + 4 * seq_len**2 * dim
+    
+    # FFN FLOPs
+    # Input -> Hidden: 2 * L * D * (mlp_ratio * D)
+    # Hidden -> Output: 2 * L * (mlp_ratio * D) * D
+    # Total FFN = 4 * mlp_ratio * L * D^2
+    
+    total_ffn_flops = 4 * mlp_ratio * seq_len * dim**2
+    
+    flops_per_block = total_attn_flops + total_ffn_flops
     total_transformer_flops = flops_per_block * num_layers
 
-    tflops = maxdiffusion_config.per_device_batch_size * total_transformer_flops / 1e12
+    tflops = config.per_device_batch_size * total_transformer_flops / 1e12
+    # 3x for forward + backward (approximate)
     train_tflops = 3 * tflops
 
     max_logging.log(f"Calculated TFLOPs per pass: {train_tflops:.4f}")
