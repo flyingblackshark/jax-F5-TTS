@@ -58,11 +58,18 @@ def encode_prompt(
     max_sequence_length: int
 ):
     prompt = prompt_clean(prompt)
-    pinyin_inputs = convert_char_to_pinyin(prompt)
+    pinyin_inputs = convert_char_to_pinyin([prompt])
 
-    text_ids, text_ids_mask = list_str_to_idx(pinyin_inputs,pipeline.global_vocab_char_map, max_length=max_sequence_length)
+    list_idx_tensors = [pipeline.global_vocab_char_map.get(c, 0) for c in pinyin_inputs[0]]
+    text_ids = np.asarray(list_idx_tensors, dtype=np.int32)
+    text_ids = text_ids + 1
+    text_ids_mask = np.ones_like(text_ids)
+    text_ids = np.pad(text_ids, ((0, max_sequence_length - text_ids.shape[0])), 'constant', constant_values=0) 
+    text_ids_mask = np.pad(text_ids_mask, ((0, max_sequence_length - text_ids_mask.shape[0])), 'constant', constant_values=0) 
 
-    text_embed_cond = encode_txt(pipeline, text_ids, text_ids_mask)
+    #text_ids, text_ids_mask = list_str_to_idx(pinyin_inputs,pipeline.global_vocab_char_map, max_length=max_sequence_length)
+
+    text_embed_cond = encode_txt(pipeline, text_ids[None], text_ids_mask[None])
     return text_embed_cond
 
 
@@ -100,7 +107,7 @@ def generate_dataset(config):
         mel = mock_mel()
         txt_embed = mock_text(pipeline)
         # Write the example, including the timestep if applicable
-        example = create_example(mel, txt_embed)
+        example = create_example(mel[0], txt_embed[0])
         writer.write(example.SerializeToString())
         shard_record_count += 1
         global_record_count += 1

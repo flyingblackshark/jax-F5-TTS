@@ -65,56 +65,56 @@ class F5Trainer:
     noise_scheduler_state = noise_scheduler.set_timesteps(noise_scheduler_state, num_inference_steps=1000, training=True)
     return noise_scheduler, noise_scheduler_state
 
-  # @staticmethod
-  # def calculate_tflops(pipeline):
+  @staticmethod
+  def calculate_tflops(pipeline):
 
-  #   maxdiffusion_config = pipeline.config
-  #   # Model configuration
-  #   height = pipeline.config.height
-  #   width = pipeline.config.width
-  #   num_frames = pipeline.config.num_frames
+    maxdiffusion_config = pipeline.config
+    # Model configuration
+    height = pipeline.config.height
+    width = pipeline.config.width
+    num_frames = pipeline.config.num_frames
 
-  #   # Transformer dimensions
-  #   transformer_config = pipeline.transformer.config
-  #   num_layers = transformer_config.num_layers
-  #   heads = pipeline.transformer.config.num_attention_heads
-  #   head_dim = pipeline.transformer.config.attention_head_dim
-  #   ffn_dim = transformer_config.ffn_dim
-  #   seq_len = int(((height / 8) * (width / 8) * ((num_frames - 1) // pipeline.vae_scale_factor_temporal + 1)) / 4)
-  #   text_encoder_dim = 512
-  #   # Attention FLOPS
-  #   # Self
-  #   self_attn_qkv_proj_flops = 3 * (2 * seq_len * (heads * head_dim) ** 2)
-  #   self_attn_qk_v_flops = 2 * (2 * seq_len**2 * (heads * head_dim))
-  #   # Cross
-  #   cross_attn_kv_proj_flops = 3 * (2 * text_encoder_dim * (heads * head_dim) ** 2)
-  #   cross_attn_q_proj_flops = 1 * (2 * seq_len * (heads * head_dim) ** 2)
-  #   cross_attention_qk_v_flops = 2 * (2 * seq_len * text_encoder_dim * (heads * head_dim))
+    # Transformer dimensions
+    transformer_config = pipeline.transformer.config
+    num_layers = transformer_config.num_layers
+    heads = pipeline.transformer.config.num_attention_heads
+    head_dim = pipeline.transformer.config.attention_head_dim
+    ffn_dim = transformer_config.ffn_dim
+    seq_len = int(((height / 8) * (width / 8) * ((num_frames - 1) // pipeline.vae_scale_factor_temporal + 1)) / 4)
+    text_encoder_dim = 512
+    # Attention FLOPS
+    # Self
+    self_attn_qkv_proj_flops = 3 * (2 * seq_len * (heads * head_dim) ** 2)
+    self_attn_qk_v_flops = 2 * (2 * seq_len**2 * (heads * head_dim))
+    # Cross
+    cross_attn_kv_proj_flops = 3 * (2 * text_encoder_dim * (heads * head_dim) ** 2)
+    cross_attn_q_proj_flops = 1 * (2 * seq_len * (heads * head_dim) ** 2)
+    cross_attention_qk_v_flops = 2 * (2 * seq_len * text_encoder_dim * (heads * head_dim))
 
-  #   # Output_projection from attention
-  #   attn_output_proj_flops = 2 * (2 * seq_len * (heads * head_dim) ** 2)
+    # Output_projection from attention
+    attn_output_proj_flops = 2 * (2 * seq_len * (heads * head_dim) ** 2)
 
-  #   total_attn_flops = (
-  #       self_attn_qkv_proj_flops
-  #       + self_attn_qk_v_flops
-  #       + cross_attn_kv_proj_flops
-  #       + cross_attn_q_proj_flops
-  #       + cross_attention_qk_v_flops
-  #       + attn_output_proj_flops
-  #   )
+    total_attn_flops = (
+        self_attn_qkv_proj_flops
+        + self_attn_qk_v_flops
+        + cross_attn_kv_proj_flops
+        + cross_attn_q_proj_flops
+        + cross_attention_qk_v_flops
+        + attn_output_proj_flops
+    )
 
-  #   # FFN
-  #   ffn_flops = 2 * (2 * seq_len * (heads * head_dim) * ffn_dim)
+    # FFN
+    ffn_flops = 2 * (2 * seq_len * (heads * head_dim) * ffn_dim)
 
-  #   flops_per_block = total_attn_flops + ffn_flops
+    flops_per_block = total_attn_flops + ffn_flops
 
-  #   total_transformer_flops = flops_per_block * num_layers
+    total_transformer_flops = flops_per_block * num_layers
 
-  #   tflops = maxdiffusion_config.per_device_batch_size * total_transformer_flops / 1e12
-  #   train_tflops = 3 * tflops
+    tflops = maxdiffusion_config.per_device_batch_size * total_transformer_flops / 1e12
+    train_tflops = 3 * tflops
 
-  #   max_logging.log(f"Calculated TFLOPs per pass: {train_tflops:.4f}")
-  #   return train_tflops, total_attn_flops, seq_len
+    max_logging.log(f"Calculated TFLOPs per pass: {train_tflops:.4f}")
+    return train_tflops, total_attn_flops, seq_len
 
   def get_data_shardings(self, mesh):
     data_sharding = jax.sharding.NamedSharding(mesh, P(*self.config.data_sharding))
@@ -257,14 +257,14 @@ class F5Trainer:
     data_shardings = self.get_data_shardings(mesh)
     eval_data_shardings = self.get_eval_data_shardings(mesh)
 
-    # writer = max_utils.initialize_summary_writer(self.config)
-    # writer_thread = threading.Thread(target=_tensorboard_writer_worker, args=(writer, self.config), daemon=True)
-    # writer_thread.start()
+    writer = max_utils.initialize_summary_writer(self.config)
+    writer_thread = threading.Thread(target=_tensorboard_writer_worker, args=(writer, self.config), daemon=True)
+    writer_thread.start()
 
-    # num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-    # max_utils.add_text_to_summary_writer("number_model_parameters", str(num_model_parameters), writer)
-    # max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ.get("LIBTPU_INIT_ARGS", ""), writer)
-    # max_utils.add_config_to_summary_writer(self.config, writer)
+    num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
+    max_utils.add_text_to_summary_writer("number_model_parameters", str(num_model_parameters), writer)
+    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ.get("LIBTPU_INIT_ARGS", ""), writer)
+    max_utils.add_config_to_summary_writer(self.config, writer)
 
     if jax.process_index() == 0:
       max_logging.log("***** Running training *****")
@@ -299,7 +299,7 @@ class F5Trainer:
     if restore_args.get("step", 0):
       max_logging.log(f"Resuming training from step {step}")
     start_step = restore_args.get("step", 0)
-    #per_device_tflops, _, _ = F5Trainer.calculate_tflops(pipeline)
+    per_device_tflops, _, _ = F5Trainer.calculate_tflops(pipeline)
     scheduler_state = pipeline.scheduler_state
     example_batch = load_next_batch(train_data_iterator, None, self.config)
 
@@ -319,11 +319,11 @@ class F5Trainer:
         if self.config.enable_profiler and step == last_profiling_step:
           max_utils.deactivate_profiler(self.config)
 
-        # train_utils.record_scalar_metrics(
-        #     train_metric, last_step_completion - start_step_time, per_device_tflops, learning_rate_scheduler(step)
-        # )
-        # if self.config.write_metrics:
-        #   train_utils.write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
+        train_utils.record_scalar_metrics(
+            train_metric, last_step_completion - start_step_time, per_device_tflops, learning_rate_scheduler(step)
+        )
+        if self.config.write_metrics:
+          train_utils.write_metrics(writer, local_metrics_file, running_gcs_metrics, train_metric, step, self.config)
 
         # if self.config.eval_every > 0 and (step + 1) % self.config.eval_every == 0:
         #   if self.config.enable_generate_video_for_eval:
@@ -333,13 +333,13 @@ class F5Trainer:
         #   # This assumes your data loading logic can be called to get a fresh iterator.
         #   self.eval(mesh, eval_rng_key, step, p_eval_step, state, scheduler_state, writer)
 
-      example_batch = next_batch_future.result()
-      if step != 0 and self.config.checkpoint_every != -1 and step % self.config.checkpoint_every == 0:
-        max_logging.log(f"Saving checkpoint for step {step}")
-        if self.config.save_optimizer:
-          self.checkpointer.save_checkpoint(step, pipeline, state)
-        else:
-          self.checkpointer.save_checkpoint(step, pipeline, state.params)
+        example_batch = next_batch_future.result()
+        if step != 0 and self.config.checkpoint_every != -1 and step % self.config.checkpoint_every == 0:
+          max_logging.log(f"Saving checkpoint for step {step}")
+          if self.config.save_optimizer:
+            self.checkpointer.save_checkpoint(step, pipeline, state)
+          else:
+            self.checkpointer.save_checkpoint(step, pipeline, state.params)
 
     _metrics_queue.put(None)
     writer_thread.join()
@@ -390,7 +390,7 @@ def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
         rngs=nnx.Rngs(dropout_rng),
     )
 
-    training_target = scheduler.training_target(latents, noise, timesteps)
+    training_target = scheduler.training_target(mel, noise, timesteps)
     training_weight = jnp.expand_dims(scheduler.training_weight(scheduler_state, timesteps), axis=(1, 2, 3, 4))
     loss = (training_target - model_pred) ** 2
     loss = loss * training_weight
