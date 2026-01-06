@@ -11,16 +11,7 @@ import os
 API_URL = "http://127.0.0.1:8000/generate"
 OUTPUT_FILE = "output_generation.wav"
 
-def create_dummy_audio():
-    """Create a 1-second dummy audio file (sine wave) for testing."""
-    sr = 24000
-    t = np.linspace(0, 1, sr, endpoint=False)
-    # 440Hz sine wave
-    audio = 0.5 * np.sin(2 * np.pi * 440 * t)
-    
-    buffer = io.BytesIO()
-    sf.write(buffer, audio, sr, format='WAV')
-    return buffer.getvalue()
+
 
 def main():
     print("Preparing request...")
@@ -30,8 +21,9 @@ def main():
     # with open("path/to/ref.wav", "rb") as f:
     #     audio_bytes = f.read()
     
-    # Here we create dummy audio for demonstration
-    audio_bytes = create_dummy_audio()
+    # Read test.mp3
+    with open("test.mp3", "rb") as f:
+        audio_bytes = f.read()
     
     # 2. Encode to Base64
     audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
@@ -40,7 +32,8 @@ def main():
     payload = {
         "text": "Hello, this is a test of the F5 TTS API.",
         "ref_audio": audio_b64,
-        "ref_text": "Reference text for the dummy audio.",
+        "ref_text": "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world.",
+        "gen_len": 500,
         "speed": 1.0,
         "steps": 30
     }

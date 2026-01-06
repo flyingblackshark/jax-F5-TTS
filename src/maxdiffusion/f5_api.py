@@ -9,6 +9,7 @@ import numpy as np
 import soundfile as sf
 import librosa
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import zmq
 import zmq.asyncio
@@ -48,6 +49,7 @@ class GenerateRequest(BaseModel):
     cfg: float = 2.0
     speed: float = 1.0
     sway_sampling: bool = False
+    gen_len: int = Field(default=None, description="Fixed generation length in frames. If set, text chunking is disabled.")
 
 class GenerateResponse(BaseModel):
     audio_base64: str
@@ -72,6 +74,14 @@ async def lifespan(app: FastAPI):
         zmq_context.term()
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- Endpoints ---
 
@@ -106,22 +116,40 @@ async def generate(request: GenerateRequest):
     # For now match the constant in original file.
     MAX_SEQUENCE_LENGTH = 2048 
     
-    chars_per_sec_ref = len(ref_text.encode("utf-8")) / ref_duration_sec
-    max_gen_duration_sec = MAX_SEQUENCE_LENGTH * 256 / TARGET_SR - ref_duration_sec
+    gen_text = request.text
+    ref_text = request.ref_text
+    speed_factor = request.speed
     
-    if max_gen_duration_sec <= 0:
-         raise HTTPException(status_code=400, detail="Reference audio too long for max sequence length")
+    # Ensure reference text ends with space if last char is ASCII
+    if ref_text and len(ref_text[-1].encode("utf-8")) == 1:
+        ref_text = ref_text + " "
 
-    estimated_max_chars = max(10, int(chars_per_sec_ref * max_gen_duration_sec * 0.8 * speed_factor))
-    
-    gen_text_batches = chunk_text(gen_text, max_chars=estimated_max_chars)
-    num_chunks = len(gen_text_batches)
-    
-    if num_chunks == 0:
-         raise HTTPException(status_code=400, detail="No chunks generated")
-    
-    if num_chunks > MAX_CHUNKS:
-         raise HTTPException(status_code=400, detail=f"Text too long, resulted in {num_chunks} chunks (max {MAX_CHUNKS})")
+    if request.gen_len is not None:
+        # Fixed duration mode - Treats text as single chunk
+        gen_text_batches = [gen_text]
+        chunk_durations = [request.gen_len]
+        num_chunks = 1
+    else:
+        # Standard mode - Dynamic chunking and duration
+        chars_per_sec_ref = len(ref_text.encode("utf-8")) / ref_duration_sec
+        max_gen_duration_sec = MAX_SEQUENCE_LENGTH * 256 / TARGET_SR - ref_duration_sec
+        
+        if max_gen_duration_sec <= 0:
+             raise HTTPException(status_code=400, detail="Reference audio too long for max sequence length")
+
+        estimated_max_chars = max(10, int(chars_per_sec_ref * max_gen_duration_sec * 0.8 * speed_factor))
+        
+        gen_text_batches = chunk_text(gen_text, max_chars=estimated_max_chars)
+        num_chunks = len(gen_text_batches)
+        
+        if num_chunks == 0:
+             raise HTTPException(status_code=400, detail="No chunks generated")
+        
+        if num_chunks > MAX_CHUNKS:
+             raise HTTPException(status_code=400, detail=f"Text too long, resulted in {num_chunks} chunks (max {MAX_CHUNKS})")
+        
+        chunk_durations = [] # To be filled later
+
 
     # Truncate Ref Audio Logic
     hop_length = 256
@@ -192,14 +220,19 @@ async def generate(request: GenerateRequest):
         text_combined = ref_text + single_gen_text
         batched_text_list_combined.append(text_combined)
 
-        ref_text_byte_len = len(ref_text.encode('utf-8'))
-        gen_text_byte_len = len(single_gen_text.encode('utf-8'))
-
-        if ref_text_byte_len > 0:
-             estimated_gen_frames = int(ref_audio_len_frames / ref_text_byte_len * gen_text_byte_len / speed_factor)
+        if request.gen_len is not None:
+             # Use fixed duration provided
+             estimated_gen_frames = request.gen_len
         else:
-             avg_chars_per_sec = 5 * speed_factor
-             estimated_gen_frames = int(gen_text_byte_len * (TARGET_SR / hop_length) / avg_chars_per_sec) if avg_chars_per_sec > 0 else 50
+            ref_text_byte_len = len(ref_text.encode('utf-8'))
+            gen_text_byte_len = len(single_gen_text.encode('utf-8'))
+
+            if ref_text_byte_len > 0:
+                 estimated_gen_frames = int(ref_audio_len_frames / ref_text_byte_len * gen_text_byte_len / speed_factor)
+            else:
+                 avg_chars_per_sec = 5 * speed_factor
+                 estimated_gen_frames = int(gen_text_byte_len * (TARGET_SR / hop_length) / avg_chars_per_sec) if avg_chars_per_sec > 0 else 50
+
 
         estimated_gen_frames = max(0, estimated_gen_frames)
         duration_frames = ref_audio_len_frames + estimated_gen_frames
