@@ -27,8 +27,6 @@ from etils import epath
 
 from ..pipelines.f5.f5_pipeline import F5Pipeline
 
-
-
 F5_CHECKPOINT = "F5_CHECKPOINT"
 
 class F5Checkpointer(ABC):
@@ -77,7 +75,7 @@ class F5Checkpointer(ABC):
         step=step,
         args=ocp.args.Composite(
             f5_state=params_restore,
-            f5_config=ocp.args.JsonRestore(),
+            #f5_config=ocp.args.JsonRestore(),
         ),
     )
     max_logging.log(f"restored checkpoint {restored_checkpoint.keys()}")
@@ -108,12 +106,12 @@ class F5Checkpointer(ABC):
   def save_checkpoint(self, train_step, pipeline: F5Pipeline, train_states: dict):
     """Saves the training state and model configurations."""
 
-    def config_to_json(model_or_config):
-      return json.loads(model_or_config.to_json_string())
+    # def config_to_json(model_or_config):
+    #   return json.loads(model_or_config.to_json_string())
 
     max_logging.log(f"Saving checkpoint for step {train_step}")
     items = {
-        "f5_config": ocp.args.JsonSave(config_to_json(pipeline.transformer)),
+        #"f5_config": ocp.args.JsonSave(config_to_json(pipeline.transformer)),
     }
 
     items["f5_state"] = ocp.args.PyTreeSave(train_states)

@@ -17,7 +17,7 @@
 import os
 import datetime
 import functools
-from pprint import pprint
+import pprint
 import numpy as np
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -33,8 +33,7 @@ from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
 from maxdiffusion.input_pipeline.input_pipeline_interface import (make_data_iterator)
 from maxdiffusion.train_utils import (_tensorboard_writer_worker, load_next_batch, _metrics_queue)
 from flax.training import train_state
-from maxdiffusion.pipelines.f5.f5_pipeline import F5Pipeline
-from jax.experimental import multihost_utils
+
 
 
 class TrainState(train_state.TrainState):

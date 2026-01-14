@@ -94,10 +94,10 @@ def create_sharded_logical_text_encoder(
     return f5_text_encoder
 
   # 1. Load config.
-  if restored_checkpoint:
-    f5_config = restored_checkpoint["f5_config"]
-  else:
-    f5_config = {}
+  # if restored_checkpoint:
+  #   f5_config = restored_checkpoint["f5_config"]
+  # else:
+  f5_config = {}
 
   #f5_config["mesh"] = mesh
   f5_config["dtype"] = config.activations_dtype

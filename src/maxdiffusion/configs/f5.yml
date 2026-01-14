@@ -246,7 +246,7 @@ names_which_can_be_saved: []
 names_which_can_be_offloaded: []
 
 # checkpoint every number of sampoutput_dirles, -1 means don't checkpoint.
-checkpoint_every: -1
+checkpoint_every: 10
 checkpoint_dir: ""
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
@@ -259,8 +259,8 @@ max_train_samples: -1
 max_train_steps: 200
 num_train_epochs: 1
 seed: 0
-output_dir: 'sdxl-model-finetuned'
-per_device_batch_size: 1.0
+output_dir: '/bucket/test-checkpoint/test1'
+per_device_batch_size: 2.0
 # If global_batch_size % jax.device_count is not 0, use FSDP sharding.
 global_batch_size: 0
 
@@ -270,6 +270,7 @@ no_records_per_shard: 0
 
 warmup_steps_fraction: 0.0
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
+save_optimizer: False
 
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
