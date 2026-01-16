@@ -49,7 +49,26 @@ from maxdiffusion.models.vocos.vocos import Vocos
 from maxdiffusion.models.vocos.vocos_utils import load_vocos
 
 
+def cast_with_exclusion(path, x, dtype_to_cast):
+  """
+  Casts arrays to dtype_to_cast, but keeps params from any 'norm' layer in float32.
+  """
 
+  exclusion_keywords = [
+      "norm",  # For all LayerNorm/GroupNorm layers
+      "condition_embedder",  # The entire time/text conditioning module
+      "scale_shift_table",  # Catches both the final and the AdaLN tables
+  ]
+
+  path_str = ".".join(str(k.key) if isinstance(k, jax.tree_util.DictKey) else str(k) for k in path)
+
+  if any(keyword in path_str.lower() for keyword in exclusion_keywords):
+    print("is_norm_path: ", path)
+    # Keep LayerNorm/GroupNorm weights and biases in full precision
+    return x.astype(jnp.float32)
+  else:
+    # Cast everything else to dtype_to_cast
+    return x.astype(dtype_to_cast)
 
 def _add_sharding_rule(vs: nnx.VariableState, logical_axis_rules) -> nnx.VariableState:
   vs.sharding_rules = logical_axis_rules
@@ -75,8 +94,8 @@ def create_sharded_logical_vocos_vocoder(
     params = load_vocos(config.vocos_vocoder_pretrained_model_name_or_path, params, "cpu")
     params = jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), params)
     for path, val in flax.traverse_util.flatten_dict(params).items():
-        if restored_checkpoint:
-            path = path[:-1]
+        # if restored_checkpoint:
+        #     path = path[:-1]
         sharding = logical_state_sharding[path].value
         state[path].value = device_put_replicated(val, sharding)
     state = nnx.from_flat_state(state)
@@ -123,16 +142,16 @@ def create_sharded_logical_text_encoder(
   # 4. Load pretrained weights and move them to device using the state shardings from (3) above.
   # This helps with loading sharded weights directly into the accelerators without fist copying them
   # all to one device and then distributing them, thus using low HBM memory.
-  if restored_checkpoint:
-    params = restored_checkpoint["f5_text_encoder_state"]
-  else:
-    params = load_f5_text_encoder(
-        config.f5_text_encoder_pretrained_model_name_or_path, params, "cpu"
-    )
+  # if restored_checkpoint:
+  #   params = restored_checkpoint["f5_text_encoder_state"]
+  # else:
+  params = load_f5_text_encoder(
+      config.f5_text_encoder_pretrained_model_name_or_path, params, "cpu"
+  )
   params = jax.tree_util.tree_map(lambda x: x.astype(config.weights_dtype), params)
   for path, val in flax.traverse_util.flatten_dict(params).items():
-    if restored_checkpoint:
-      path = path[:-1]
+    # if restored_checkpoint:
+    #   path = path[:-1]
     sharding = logical_state_sharding[path].value
     state[path].value = device_put_replicated(val, sharding)
   state = nnx.from_flat_state(state)
@@ -150,10 +169,10 @@ def create_sharded_logical_transformer(
     return f5_transformer
 
   # 1. Load config.
-  if restored_checkpoint:
-    f5_config = restored_checkpoint["f5_config"]
-  else:
-    f5_config = {}
+  # if restored_checkpoint:
+  #   f5_config = restored_checkpoint["f5_config"]
+  # else:
+  f5_config = {}
   f5_config["mesh"] = mesh
   f5_config["dtype"] = config.activations_dtype
   f5_config["weights_dtype"] = config.weights_dtype
@@ -183,12 +202,28 @@ def create_sharded_logical_transformer(
   # This helps with loading sharded weights directly into the accelerators without fist copying them
   # all to one device and then distributing them, thus using low HBM memory.
   if restored_checkpoint:
-    params = restored_checkpoint["f5_transformer_state"]
+    new_params = {}
+    params = restored_checkpoint["f5_state"]
+    for flax_key, tensor in flax.traverse_util.flatten_dict(params).items():
+      if isinstance(flax_key, tuple):
+        def _tuple_str_to_int(in_tuple):
+          out_list = []
+          for item in in_tuple:
+            try:
+              out_list.append(int(item))
+            except ValueError:
+              out_list.append(item)
+          return tuple(out_list)
+        flax_key = _tuple_str_to_int(flax_key)
+      new_params[flax_key] = tensor
+    params = flax.traverse_util.unflatten_dict(new_params)
   else:
     params = load_f5_transformer(
         config.f5_transformer_pretrained_model_name_or_path, params, "cpu", num_layers=f5_config["num_depth"]
     )
-  params = jax.tree_util.tree_map(lambda x: x.astype(config.weights_dtype), params)
+    params = jax.tree_util.tree_map_with_path(
+      lambda path, x: cast_with_exclusion(path, x, dtype_to_cast=config.weights_dtype), params
+    )
   for path, val in flax.traverse_util.flatten_dict(params).items():
     if restored_checkpoint:
       path = path[:-1]

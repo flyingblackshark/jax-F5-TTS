@@ -246,7 +246,7 @@ names_which_can_be_saved: []
 names_which_can_be_offloaded: []
 
 # checkpoint every number of sampoutput_dirles, -1 means don't checkpoint.
-checkpoint_every: 10
+checkpoint_every: 1000
 checkpoint_dir: ""
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False

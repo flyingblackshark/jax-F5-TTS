@@ -94,8 +94,8 @@ class F5Checkpointer(ABC):
     if restored_checkpoint:
       max_logging.log("Loading F5 pipeline from checkpoint")
       pipeline = F5Pipeline.from_checkpoint(self.config, restored_checkpoint)
-      if "opt_state" in restored_checkpoint.wan_state.keys():
-        opt_state = restored_checkpoint.wan_state["opt_state"]
+      if "opt_state" in restored_checkpoint.f5_state.keys():
+        opt_state = restored_checkpoint.f5_state["opt_state"]
     else:
       max_logging.log("No checkpoint found, loading default pipeline.")
       pipeline = F5Pipeline.from_checkpoint(self.config, None)
