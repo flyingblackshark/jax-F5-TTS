@@ -123,7 +123,7 @@ class F5Trainer:
     feature_description = {
         "mel": tf.io.FixedLenFeature([], tf.string),
         "txt_embed": tf.io.FixedLenFeature([], tf.string),
-        "decoder_segment_ids": tf.io.FixedLenFeature([], tf.int64),
+        "decoder_segment_ids": tf.io.FixedLenFeature([], tf.string),
     }
 
     if not is_training:
@@ -132,7 +132,7 @@ class F5Trainer:
     def prepare_sample_train(features):
       mel = tf.io.parse_tensor(features["mel"], out_type=tf.float32)
       txt_embed = tf.io.parse_tensor(features["txt_embed"], out_type=tf.float32)
-      decoder_segment_ids = features["decoder_segment_ids"]
+      decoder_segment_ids = tf.io.parse_tensor(features["decoder_segment_ids"], out_type=tf.int32)
       return {"mel": mel, "txt_embed": txt_embed, "decoder_segment_ids": decoder_segment_ids}
 
     # def prepare_sample_eval(features):
@@ -348,14 +348,29 @@ def train_step(state, data, rng, scheduler_state, scheduler, config):
   return step_optimizer(state, data, rng, scheduler_state, scheduler, config)
 
 
+def mask_from_start_end_indices(seq_len_max, start, end):
+  seq = jnp.arange(seq_len_max)
+  start_mask = seq[None, :] >= start[:, None]
+  end_mask = seq[None, :] < end[:, None]
+  return start_mask & end_mask
+
+
+def mask_from_frac_lengths(seq_len, frac_lengths, rng, max_len):
+  lengths = (frac_lengths * seq_len).astype(jnp.int32)
+  max_start = seq_len - lengths
+
+  rand = jax.random.uniform(rng, shape=frac_lengths.shape)
+  start = (max_start * rand).astype(jnp.int32).clip(min=0)
+  end = start + lengths
+
+  return mask_from_start_end_indices(max_len, start, end)
+
+
 def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
-  _, new_rng, timestep_rng, dropout_rng = jax.random.split(rng, num=4)
+  _, new_rng, timestep_rng, mask_rng, dropout_rng = jax.random.split(rng, num=5)
 
   for k, v in data.items():
-    if k == "decoder_segment_ids":
-      data[k] = v[: config.global_batch_size_to_train_on]
-    else:
-      data[k] = v[: config.global_batch_size_to_train_on, :]
+    data[k] = v[: config.global_batch_size_to_train_on, :]
 
   def loss_fn(params):
     model = nnx.merge(state.graphdef, params, state.rest_of_state)
@@ -372,12 +387,14 @@ def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
     noise = jax.random.normal(key=new_rng, shape=mel.shape, dtype=mel.dtype)
     noisy_latents = scheduler.add_noise(scheduler_state, mel, noise, timesteps)
 
-    cond = mel
-    #cond = jnp.where(rand_span_mask[..., None], jnp.zeros_like(mel), mel)
+    seq_lens = jnp.sum(decoder_segment_ids, axis=1)
+    frac_lengths = jax.random.uniform(mask_rng, (bsz,), minval=0.7, maxval=1.0)
+    rand_span_mask = mask_from_frac_lengths(seq_lens, frac_lengths, mask_rng, mel.shape[1])
+    cond = jnp.where(rand_span_mask[..., None], jnp.zeros_like(mel), mel)
     
     # create mask by decoder_segment_ids
     # decoder_segment_ids is a 1D tensor of lengths
-    mask = jnp.arange(mel.shape[1])[None, :] < decoder_segment_ids[:, None]
+    mask = decoder_segment_ids > 0
     
     model_pred = model(
         x=noisy_latents,

@@ -26,16 +26,17 @@ def bytes_feature(value):
 
 def int64_feature(value):
   """Returns an int64_list from a bool / enum / int / uint."""
-  return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+  return tf.train.Feature(int64_list=tf.train.Int64List(value=value))
 
 
 def create_example(mel, txt_embed, decoder_segment_ids):
   mel = tf.io.serialize_tensor(mel)
   txt_embed = tf.io.serialize_tensor(txt_embed)
+  decoder_segment_ids = tf.io.serialize_tensor(decoder_segment_ids)
   feature = {
       "mel": bytes_feature(mel),
       "txt_embed": bytes_feature(txt_embed),
-      "decoder_segment_ids": int64_feature(decoder_segment_ids),
+      "decoder_segment_ids": bytes_feature(decoder_segment_ids),
   }
 
   return tf.train.Example(features=tf.train.Features(feature=feature))
@@ -46,7 +47,11 @@ def mock_mel():
     mock_audio = jax.random.normal(jax.random.PRNGKey(0), (1, 24000 * 10))
     mel = get_mel(mock_audio)
     mel_len = mel.shape[1]
-    return jnp.pad(mel, ((0,0),(0, max_sequence_length - mel.shape[1]),(0,0)), 'constant'), mel_len
+    
+    decoder_segment_ids = np.zeros((max_sequence_length,), dtype=np.int32)
+    decoder_segment_ids[:mel_len] = 1
+    
+    return jnp.pad(mel, ((0,0),(0, max_sequence_length - mel.shape[1]),(0,0)), 'constant'), decoder_segment_ids
 
 
 def encode_txt(pipeline, text_ids, text_ids_mask):
@@ -109,10 +114,10 @@ def generate_dataset(config):
     shard_record_count = 0
 
     for i in range(100):
-        mel, mel_len = mock_mel()
+        mel, decoder_segment_ids = mock_mel()
         txt_embed = mock_text(pipeline)
         # Write the example, including the timestep if applicable
-        example = create_example(mel[0], txt_embed[0], mel_len)
+        example = create_example(mel[0], txt_embed[0], decoder_segment_ids)
         writer.write(example.SerializeToString())
         shard_record_count += 1
         global_record_count += 1
