@@ -106,12 +106,12 @@ class F5Trainer:
 
   def get_data_shardings(self, mesh):
     data_sharding = jax.sharding.NamedSharding(mesh, P(*self.config.data_sharding))
-    data_sharding = {"mel": data_sharding, "txt_embed": data_sharding}
+    data_sharding = {"mel": data_sharding, "txt_embed": data_sharding, "decoder_segment_ids": data_sharding }
     return data_sharding
 
   def get_eval_data_shardings(self, mesh):
     data_sharding = jax.sharding.NamedSharding(mesh, P(*self.config.data_sharding))
-    data_sharding = {"mel": data_sharding, "txt_embed": data_sharding, "timesteps": data_sharding}
+    data_sharding = {"mel": data_sharding, "txt_embed": data_sharding, "decoder_segment_ids": data_sharding}
     return data_sharding
 
   def load_dataset(self, mesh, is_training=True):
@@ -123,6 +123,7 @@ class F5Trainer:
     feature_description = {
         "mel": tf.io.FixedLenFeature([], tf.string),
         "txt_embed": tf.io.FixedLenFeature([], tf.string),
+        "decoder_segment_ids": tf.io.FixedLenFeature([], tf.int64),
     }
 
     if not is_training:
@@ -131,7 +132,8 @@ class F5Trainer:
     def prepare_sample_train(features):
       mel = tf.io.parse_tensor(features["mel"], out_type=tf.float32)
       txt_embed = tf.io.parse_tensor(features["txt_embed"], out_type=tf.float32)
-      return {"mel": mel, "txt_embed": txt_embed}
+      decoder_segment_ids = features["decoder_segment_ids"]
+      return {"mel": mel, "txt_embed": txt_embed, "decoder_segment_ids": decoder_segment_ids}
 
     # def prepare_sample_eval(features):
     #   latents = tf.io.parse_tensor(features["latents"], out_type=tf.float32)
@@ -350,12 +352,16 @@ def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
   _, new_rng, timestep_rng, dropout_rng = jax.random.split(rng, num=4)
 
   for k, v in data.items():
-    data[k] = v[: config.global_batch_size_to_train_on, :]
+    if k == "decoder_segment_ids":
+      data[k] = v[: config.global_batch_size_to_train_on]
+    else:
+      data[k] = v[: config.global_batch_size_to_train_on, :]
 
   def loss_fn(params):
     model = nnx.merge(state.graphdef, params, state.rest_of_state)
     mel = data["mel"].astype(config.weights_dtype)
     txt_embed = data["txt_embed"].astype(config.weights_dtype)
+    decoder_segment_ids = data["decoder_segment_ids"]
     bsz = mel.shape[0]
     timesteps = jax.random.randint(
         timestep_rng,
@@ -368,12 +374,17 @@ def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
 
     cond = mel
     #cond = jnp.where(rand_span_mask[..., None], jnp.zeros_like(mel), mel)
+    
+    # create mask by decoder_segment_ids
+    # decoder_segment_ids is a 1D tensor of lengths
+    mask = jnp.arange(mel.shape[1])[None, :] < decoder_segment_ids[:, None]
+    
     model_pred = model(
         x=noisy_latents,
         cond=cond,
         timestep=timesteps,
         text_embed=txt_embed,
-        decoder_segment_ids=jnp.ones((bsz,noisy_latents.shape[1])),
+        decoder_segment_ids=mask,
         deterministic=False,
         rngs=nnx.Rngs(dropout_rng),
     )
@@ -381,8 +392,8 @@ def step_optimizer(state, data, rng, scheduler_state, scheduler, config):
     training_target = scheduler.training_target(mel, noise, timesteps)
     training_weight = jnp.expand_dims(scheduler.training_weight(scheduler_state, timesteps), axis=(1, 2, 3, 4))
     loss = (training_target - model_pred) ** 2
-    loss = loss * training_weight
-    loss = jnp.mean(loss)
+    loss = loss * training_weight * mask[..., None]
+    loss = jnp.sum(loss) / jnp.sum(training_weight * mask[..., None])
 
     return loss
 
