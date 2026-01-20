@@ -83,6 +83,16 @@ def run(config, pipeline=None, filename_prefix=""):
   sf.write("output.wav", output_segment, samplerate=24000)
   print("compile time: ", (time.perf_counter() - s0))
 
+  s1 = time.perf_counter()
+  audios = pipeline(
+      prompt=batched_text_list,
+      reference_audio=ref_audio,
+      duration=duration,
+      max_sequence_length=2048,
+  )
+  res_cpu = np.asarray(audios)
+  print("Second run time: ", (time.perf_counter() - s1))
+
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   flax.config.update('flax_always_shard_variable', False)
