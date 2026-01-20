@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-
+from typing import Optional
 import flax.linen as nn
+from flax import nnx
 import jax.numpy as jnp
 from typing import List, Union
 import jax
+from .modeling_flax_utils import get_activation
+from ..models.attention_flax import NNXSimpleFeedForward
+from ..models.normalization_flax import FP32LayerNorm
 
 
 def get_sinusoidal_embeddings(
@@ -57,6 +61,100 @@ def get_sinusoidal_embeddings(
   return signal
 
 
+class NNXTimestepEmbedding(nnx.Module):
+  r"""
+  Time step Embedding Module. Learns embeddings for input time steps.
+
+  Args:
+      time_embed_dim (`int`, *optional*, defaults to `32`):
+              Time step embedding dimension
+      dtype (:obj:`jnp.dtype`, *optional*, defaults to jnp.float32):
+              Parameters `dtype`
+  """
+
+  def __init__(
+      self,
+      rngs: nnx.Rngs,
+      in_channels: int,
+      time_embed_dim: int = 32,
+      act_fn: str = "silu",
+      out_dim: int = None,
+      post_act_fn: Optional[str] = None,
+      cond_proj_dim: int = None,
+      sample_proj_bias=True,
+      dtype: jnp.dtype = jnp.float32,
+      weights_dtype: jnp.dtype = jnp.float32,
+      precision: jax.lax.Precision = None,
+  ):
+    self.linear_1 = nnx.Linear(
+        rngs=rngs,
+        in_features=in_channels,
+        out_features=time_embed_dim,
+        use_bias=sample_proj_bias,
+        dtype=jnp.float32,
+        param_dtype=weights_dtype,
+        precision=precision,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.xavier_uniform(),
+            (
+                "embed",
+                "mlp",
+            ),
+        ),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("mlp",)),
+    )
+
+    if cond_proj_dim is not None:
+      self.cond_proj = nnx.Linear(
+          rngs=rngs,
+      )
+    else:
+      self.cond_proj = None
+
+    self.act = get_activation(act_fn)
+
+    if out_dim is not None:
+      time_embed_dim_out = out_dim
+    else:
+      time_embed_dim_out = time_embed_dim
+
+    self.linear_2 = nnx.Linear(
+        rngs=rngs,
+        in_features=time_embed_dim,
+        out_features=time_embed_dim_out,
+        use_bias=sample_proj_bias,
+        dtype=jnp.float32,
+        param_dtype=weights_dtype,
+        precision=precision,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.xavier_uniform(),
+            (
+                "mlp",
+                "embed",
+            ),
+        ),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("embed",)),
+    )
+
+    if post_act_fn is None:
+      self.post_act = None
+    else:
+      self.post_act = get_activation(post_act_fn)
+
+  def __call__(self, sample, condition=None):
+    if condition is not None:
+      sample = sample + self.cond_proj(condition)
+    sample = self.linear_1(sample)
+
+    if self.act is not None:
+      sample = self.act(sample)
+    sample = self.linear_2(sample)
+
+    if self.post_act is not None:
+      sample = self.post_act(sample)
+    return sample
+
+
 class FlaxTimestepEmbedding(nn.Module):
   r"""
   Time step Embedding Module. Learns embeddings for input time steps.
@@ -80,6 +178,26 @@ class FlaxTimestepEmbedding(nn.Module):
     return temb
 
 
+class NNXFlaxTimesteps(nnx.Module):
+
+  def __init__(
+      self,
+      dim: int = 32,
+      flip_sin_to_cos: bool = False,
+      freq_shift: float = 1.0,
+      scale: int = 1,
+  ):
+    self.dim = dim
+    self.flip_sin_to_cos = flip_sin_to_cos
+    self.freq_shift = freq_shift
+    self.scale = scale
+
+  def __call__(self, timesteps):
+    return get_sinusoidal_embeddings(
+        timesteps, embedding_dim=self.dim, flip_sin_to_cos=self.flip_sin_to_cos, freq_shift=self.freq_shift
+    )
+
+
 class FlaxTimesteps(nn.Module):
   r"""
   Wrapper Module for sinusoidal Time step Embeddings as described in https://arxiv.org/abs/2006.11239
@@ -91,7 +209,8 @@ class FlaxTimesteps(nn.Module):
 
   dim: int = 32
   flip_sin_to_cos: bool = False
-  freq_shift: float = 1
+  freq_shift: float = 1.0
+  scale: int = 1
 
   @nn.compact
   def __call__(self, timesteps):
@@ -101,7 +220,13 @@ class FlaxTimesteps(nn.Module):
 
 
 def get_1d_rotary_pos_embed(
-    dim: int, pos: Union[jnp.array, int], theta: float = 10000.0, linear_factor=1.0, ntk_factor=1.0, freqs_dtype=jnp.float32
+    dim: int,
+    pos: Union[jnp.array, int],
+    theta: float = 10000.0,
+    linear_factor=1.0,
+    ntk_factor=1.0,
+    freqs_dtype=jnp.float32,
+    use_real: bool = True,
 ):
   """
   Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
@@ -114,11 +239,128 @@ def get_1d_rotary_pos_embed(
   theta = theta * ntk_factor
   freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2, dtype=freqs_dtype)[: (dim // 2)] / dim)) / linear_factor
   freqs = jnp.outer(pos, freqs)
-  freqs_cos = jnp.cos(freqs)
-  freqs_sin = jnp.sin(freqs)
-  out = jnp.stack([freqs_cos, -freqs_sin, freqs_sin, freqs_cos], axis=-1)
-
+  if use_real:
+    # Flux
+    freqs_cos = jnp.cos(freqs)
+    freqs_sin = jnp.sin(freqs)
+    out = jnp.stack([freqs_cos, -freqs_sin, freqs_sin, freqs_cos], axis=-1)
+  else:
+    # Wan 2.1
+    out = jnp.exp(1j * freqs)
   return out
+
+class NNXWanImageEmbedding(nnx.Module):
+  def __init__(self, rngs: nnx.Rngs, in_features: int, out_features: int, dtype: jnp.dtype, weights_dtype: jnp.dtype, precision: jax.lax.Precision, pos_embed_seq_len=None, alignment: int = 128, flash_min_seq_length: int = 4096):
+    self.norm1 = FP32LayerNorm(rngs=rngs, dim=in_features, elementwise_affine=True, eps=1e-6)
+    self.ff = NNXSimpleFeedForward(rngs=rngs, dim=in_features, dim_out=out_features, mult=1, activation_fn="gelu", dtype=dtype, weights_dtype=weights_dtype, precision=precision)
+    self.norm2 = FP32LayerNorm(rngs=rngs, dim=out_features, elementwise_affine=True, eps=1e-6)
+    self.alignment = alignment
+    self.flash_min_seq_length = flash_min_seq_length
+    if pos_embed_seq_len is not None:
+      self.pos_embed = nnx.Param(jnp.zeros((1, pos_embed_seq_len, in_features), dtype=dtype))
+    else:
+      self.pos_embed = nnx.data(None)
+
+  def __call__(self, encoder_hidden_states_image: jax.Array) -> tuple[jax.Array, jax.Array]:
+    hidden_states = encoder_hidden_states_image
+    B, current_seq_len, D_in = hidden_states.shape
+
+    if self.pos_embed is not None:
+      pe_len = self.pos_embed.value.shape[1]
+      add_len = min(current_seq_len, pe_len)
+      # Apply pos_embed to the original sequence length
+      hidden_states = hidden_states.at[:, :add_len, :].add(self.pos_embed.value[:, :add_len, :])
+      if current_seq_len > pe_len:
+          print(f"[WARN] Input seq_len {current_seq_len} > pos_embed len {pe_len}")
+
+    hidden_states = self.norm1(hidden_states)
+    hidden_states = self.ff(hidden_states)
+    hidden_states = self.norm2(hidden_states)
+    # hidden_states shape: (B, current_seq_len, out_features)
+    B, current_seq_len, D_out = hidden_states.shape
+    use_flash_attn = current_seq_len>=self.flash_min_seq_length
+
+    if use_flash_attn:
+      # --- Dynamic Padding to nearest multiple of self.alignment ---
+      num_blocks = (current_seq_len + self.alignment - 1) // self.alignment
+      target_seq_len = num_blocks * self.alignment
+    else:
+      target_seq_len = current_seq_len
+
+    # Create attention mask: 1 for real tokens, 0 for padded tokens
+    attention_mask = jnp.ones((B, current_seq_len), dtype=jnp.int32)
+
+    if current_seq_len < target_seq_len:
+        padding_size = target_seq_len - current_seq_len
+        padding = jnp.zeros((B, padding_size, D_out), dtype=hidden_states.dtype)
+        hidden_states = jnp.concatenate([hidden_states, padding], axis=1)
+
+        # Extend mask with zeros for padded positions
+        padding_mask = jnp.zeros((B, padding_size), dtype=jnp.int32)
+        attention_mask = jnp.concatenate([attention_mask, padding_mask], axis=1)
+    if not use_flash_attn:
+      attention_mask = None
+    return hidden_states, attention_mask
+
+
+class NNXPixArtAlphaTextProjection(nnx.Module):
+
+  def __init__(
+      self,
+      rngs: nnx.Rngs,
+      in_features: int,
+      hidden_size: int,
+      out_features: int = None,
+      act_fn: str = "gelu_tanh",
+      dtype: jnp.dtype = jnp.float32,
+      weights_dtype: jnp.dtype = jnp.float32,
+      precision: jax.lax.Precision = None,
+  ):
+    if out_features is None:
+      out_features = hidden_size
+
+    self.linear_1 = nnx.Linear(
+        rngs=rngs,
+        in_features=in_features,
+        out_features=hidden_size,
+        use_bias=True,
+        dtype=jnp.float32,
+        param_dtype=weights_dtype,
+        precision=precision,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.xavier_uniform(),
+            (
+                "embed",
+                "mlp",
+            ),
+        ),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("mlp",)),
+    )
+    self.act_1 = get_activation(act_fn)
+
+    self.linear_2 = nnx.Linear(
+        rngs=rngs,
+        in_features=hidden_size,
+        out_features=out_features,
+        use_bias=True,
+        dtype=jnp.float32,
+        param_dtype=weights_dtype,
+        precision=precision,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.xavier_uniform(),
+            (
+                "mlp",
+                "embed",
+            ),
+        ),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("embed",)),
+    )
+
+  def __call__(self, caption):
+    hidden_states = self.linear_1(caption)
+    hidden_states = self.act_1(hidden_states)
+    hidden_states = self.linear_2(hidden_states)
+    return hidden_states
 
 
 class PixArtAlphaTextProjection(nn.Module):
