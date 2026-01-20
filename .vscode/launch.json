@@ -33,6 +33,16 @@
             ]
         },
         {
+            "name": "Test F5 Pipeline",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "src/maxdiffusion/generate_f5_pipeline.py",
+            "console": "integratedTerminal",
+            "args": [
+                "src/maxdiffusion/configs/f5.yml"
+            ]
+        },
+        {
             "name": "Test F5 Gradio",
             "type": "debugpy",
             "request": "launch",

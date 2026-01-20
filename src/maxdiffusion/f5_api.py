@@ -1,6 +1,7 @@
 
 import os
 import sys
+import time
 import base64
 import io
 import pickle
@@ -88,6 +89,7 @@ app.add_middleware(
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest):
     # --- Preprocessing (CPU intensive, done here) ---
+    t0 = time.time()
     
     # Decode audio
     try:
@@ -261,7 +263,9 @@ async def generate(request: GenerateRequest):
         # So order should be preserved.
         tasks.append(send_request(payload))
     
+    t1 = time.time()
     results = await asyncio.gather(*tasks)
+    t2 = time.time()
     
     # results is list of numpy arrays
     final_audio_segments = []
@@ -279,6 +283,9 @@ async def generate(request: GenerateRequest):
     buffer_io = io.BytesIO()
     sf.write(buffer_io, final_audio, TARGET_SR, format='WAV')
     audio_b64 = base64.b64encode(buffer_io.getvalue()).decode('utf-8')
+
+    t3 = time.time()
+    print(f"Preprocessing: {t1-t0:.4f}s, Inference: {t2-t1:.4f}s, Postprocessing: {t3-t2:.4f}s, Total: {t3-t0:.4f}s")
 
     return GenerateResponse(audio_base64=audio_b64)
 

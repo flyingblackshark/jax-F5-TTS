@@ -97,6 +97,8 @@ def create_sharded_logical_vocos_vocoder(
         # if restored_checkpoint:
         #     path = path[:-1]
         sharding = logical_state_sharding[path].value
+        if config.replicate_vocos:
+          sharding = NamedSharding(mesh, P())
         state[path].value = device_put_replicated(val, sharding)
     state = nnx.from_flat_state(state)
     vocos_model = nnx.merge(graphdef, state, rest_of_state)
@@ -152,7 +154,10 @@ def create_sharded_logical_text_encoder(
   for path, val in flax.traverse_util.flatten_dict(params).items():
     # if restored_checkpoint:
     #   path = path[:-1]
+
     sharding = logical_state_sharding[path].value
+    if config.replicate_text_encoder:
+      sharding = NamedSharding(mesh, P())
     state[path].value = device_put_replicated(val, sharding)
   state = nnx.from_flat_state(state)
 
@@ -228,6 +233,8 @@ def create_sharded_logical_transformer(
     if restored_checkpoint:
       path = path[:-1]
     sharding = logical_state_sharding[path].value
+    if config.replicate_transformer:
+      sharding = NamedSharding(mesh, P())
     state[path].value = device_put_replicated(val, sharding)
   state = nnx.from_flat_state(state)
 
@@ -558,8 +565,8 @@ class F5Pipeline:
 
     data_sharding = NamedSharding(self.mesh, P())
     # Using global_batch_size_to_train_on so not to create more config variables
-    if self.config.global_batch_size_to_train_on // self.config.per_device_batch_size == 0:
-      data_sharding = NamedSharding(self.mesh, P(*self.config.data_sharding))
+    # if self.config.global_batch_size_to_train_on // self.config.per_device_batch_size == 0:
+    #   data_sharding = NamedSharding(self.mesh, P(*self.config.data_sharding))
 
     text_embed_cond = jax.device_put(text_embed_cond, data_sharding)
     text_embed_uncond = jax.device_put(text_embed_uncond, data_sharding)
@@ -569,11 +576,11 @@ class F5Pipeline:
     # if self._config.time_shift:
     #   timesteps = self.time_shift(latents, timesteps)
     t_start = 0
-    timesteps = jnp.linspace(t_start, 1.0, self.config.num_inference_steps + 1).astype(
-        jnp.float32
+    timesteps = np.linspace(t_start, 1.0, self.config.num_inference_steps + 1).astype(
+        np.float32
     )
     timesteps = timesteps + self.config.sway_sampling_coef * (
-        jnp.cos(jnp.pi / 2 * timesteps) - 1 + timesteps
+        np.cos(np.pi / 2 * timesteps) - 1 + timesteps
     ) 
 
     c_ts = timesteps[:-1]

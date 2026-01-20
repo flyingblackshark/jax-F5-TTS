@@ -25,7 +25,7 @@ SERVER_ADDRESS = "tcp://0.0.0.0:5555"
 
 # --- Global State ---
 global_config = None
-global_max_sequence_length = 2048
+
 global_f5_pipeline = None
 
 @dataclasses.dataclass
@@ -99,13 +99,16 @@ class BatchInferenceManager:
                  batched_duration.append(batched_duration[0])
 
         try:
+            t0 = time.time()
             audio_out_jax = self.process_func(
                 prompt=batched_text,
                 reference_audio=batched_ref_audio,
                 duration=batched_duration,
-                max_sequence_length=global_max_sequence_length,
+                max_sequence_length=global_config.max_sequence_length,
             )
             audio_out_jax.block_until_ready()
+            t1 = time.time()
+            max_logging.log(f"Batch execution time: {t1-t0:.4f}s")
             audio_out_cpu = np.asarray(audio_out_jax[:num_items])
             
             for i, req in enumerate(batch):
@@ -117,7 +120,7 @@ class BatchInferenceManager:
                 self.result_callback(req.identity, {"status": "error", "message": str(e)})
 
 def main(argv):
-    global global_config, global_f5_pipeline, global_max_sequence_length
+    global global_config, global_f5_pipeline
     
     # --- Setup JAX/Model ---
     config_path = "src/maxdiffusion/configs/f5.yml"

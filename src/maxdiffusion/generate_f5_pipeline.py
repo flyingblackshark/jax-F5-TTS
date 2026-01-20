@@ -34,15 +34,13 @@ def run(config, pipeline=None, filename_prefix=""):
   from maxdiffusion.checkpointing.f5_checkpointer import F5Checkpointer
 
   checkpoint_loader = F5Checkpointer(config, "F5_CHECKPOINT")
-  pipeline = checkpoint_loader.load_checkpoint()
-  # if pipeline is None:
-  #   pipeline = F5Pipeline.from_pretrained(config)
+  pipeline,_,_ = checkpoint_loader.load_checkpoint()
   s0 = time.perf_counter()
 
   # Using global_batch_size_to_train_on so not to create more config variables
   ref_text = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
   gen_text = "Hello,I'm Aurora.And nice to meet you.This is a very long sentence intended to test the stability of the model.I really like this model and so I use it a lot."
-  ref_audio, ref_sr = librosa.load("/home/fbs/jax-F5-TTS/test.mp3", sr=24000)
+  ref_audio, ref_sr = librosa.load("test.mp3", sr=24000)
   local_speed = 1
   # max_logging.log(
   #     f"Num steps: {config.num_inference_steps}, height: {config.height}, width: {config.width}, frames: {config.num_frames}"

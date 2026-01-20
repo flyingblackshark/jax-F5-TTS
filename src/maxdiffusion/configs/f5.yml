@@ -330,3 +330,7 @@ quantization: ''
 quantization_local_shard_count: -1
 use_qwix_quantization: False 
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+replicate_vocos: True
+replicate_text_encoder: True
+replicate_transformer: True
