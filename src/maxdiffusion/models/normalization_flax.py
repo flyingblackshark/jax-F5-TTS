@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import PartitionSpec
 import jax.lax
-
+import flax.linen as nn
 
 class AdaLayerNormContinuous(nnx.Module):
     def __init__(
@@ -50,8 +50,8 @@ class AdaLayerNormContinuous(nnx.Module):
             dtype=dtype,
             param_dtype=weights_dtype,
             precision=self.precision,
-            kernel_init=nnx.initializers.lecun_normal(),
-            bias_init=nnx.initializers.zeros,
+            kernel_init=nnx.with_logical_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
+            bias_init=nnx.with_logical_partitioning(nnx.initializers.zeros, ("mlp")),
             rngs=rngs,
         )
 
@@ -70,6 +70,8 @@ class AdaLayerNormContinuous(nnx.Module):
         emb = jax.nn.silu(conditioning_embedding)
         emb = self.linear(emb)
         scale, shift = jnp.split(emb, 2, axis=-1)
+        shift = nn.with_logical_constraint(shift, ("activation_batch", "activation_embed"))
+        scale = nn.with_logical_constraint(scale, ("activation_batch", "activation_embed"))
         x = self.layer_norm(x)
         x = (1 + scale[:, None, :]) * x + shift[:, None, :]
         return x
@@ -108,8 +110,8 @@ class AdaLayerNormZero(nnx.Module):
             use_bias=bias,
             dtype=dtype,
             param_dtype=weights_dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            bias_init=nnx.initializers.zeros,
+            kernel_init=nnx.with_logical_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
+            bias_init=nnx.with_logical_partitioning(nnx.initializers.zeros, ("mlp")),
             precision=self.precision,
             rngs=rngs,
         )
@@ -130,7 +132,12 @@ class AdaLayerNormZero(nnx.Module):
         (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp) = jnp.split(
             emb[:, None, :], 6, axis=-1
         )
-
+        shift_msa = nn.with_logical_constraint(shift_msa, ("activation_batch", "activation_embed"))
+        scale_msa = nn.with_logical_constraint(scale_msa, ("activation_batch", "activation_embed"))
+        gate_msa = nn.with_logical_constraint(gate_msa, ("activation_batch", "activation_embed"))
+        shift_mlp = nn.with_logical_constraint(shift_mlp, ("activation_batch", "activation_embed"))
+        scale_mlp = nn.with_logical_constraint(scale_mlp, ("activation_batch", "activation_embed"))
+        gate_mlp = nn.with_logical_constraint(gate_mlp, ("activation_batch", "activation_embed"))
         if self.norm_type == "layer_norm":
             x = self.layer_norm(x)
         else:
