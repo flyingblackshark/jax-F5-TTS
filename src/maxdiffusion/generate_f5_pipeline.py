@@ -64,32 +64,48 @@ def run(config, pipeline=None, filename_prefix=""):
       batched_duration.append(duration)
       batched_text_list.append(text_list)
 
+  device_count = jax.device_count()
+  num_items = len(batched_text_list)
+  pad_amount = (device_count - (num_items % device_count)) % device_count
+  
+  if pad_amount > 0:
+      batched_text_list.extend([batched_text_list[-1]] * pad_amount)
+      batched_duration.extend([batched_duration[-1]] * pad_amount)
+
+  # Convert ref_audio to list and pad
+  padded_ref_audio = [ref_audio] * len(batched_text_list)
+
   audios = pipeline(
       prompt=batched_text_list,
-      reference_audio=ref_audio,
-      duration=duration,
+      reference_audio=padded_ref_audio,
+      duration=batched_duration,
       max_sequence_length=2048,
   )
 
   res_cpu = np.asarray(audios)
-  output_segment = res_cpu[0][ref_audio_len * 256 : batched_duration[0] * 256]
-  for i in range(len(batched_duration)-1):
+  # Only use original items
+  valid_batched_duration = batched_duration[:num_items]
+  
+  output_segment = res_cpu[0][ref_audio_len * 256 : valid_batched_duration[0] * 256]
+  for i in range(len(valid_batched_duration)-1):
       output_segment = np.concatenate(
           (
               output_segment,
-              res_cpu[i + 1][ref_audio_len * 256 : batched_duration[i + 1] * 256],
+              res_cpu[i + 1][ref_audio_len * 256 : valid_batched_duration[i + 1] * 256],
           )
       )
   sf.write("output.wav", output_segment, samplerate=24000)
   print("compile time: ", (time.perf_counter() - s0))
 
   s1 = time.perf_counter()
-  audios = pipeline(
+  with jax.profiler.trace("/tmp/tensorboard/profile_run", create_perfetto_link=True):
+    audios = pipeline(
       prompt=batched_text_list,
-      reference_audio=ref_audio,
-      duration=duration,
+      reference_audio=padded_ref_audio,
+      duration=batched_duration,
       max_sequence_length=2048,
-  )
+    )
+    audios.block_until_ready()
   res_cpu = np.asarray(audios)
   print("Second run time: ", (time.perf_counter() - s1))
 

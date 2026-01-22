@@ -579,6 +579,7 @@ class F5Pipeline:
     step_cond = jax.device_put(step_cond, data_sharding)
     text_embed_cond = jax.device_put(text_embed_cond, data_sharding)
     text_embed_uncond = jax.device_put(text_embed_uncond, data_sharding)
+    mask = jax.device_put(mask.astype(np.int32), data_sharding)
 
     graphdef, state, rest_of_state = nnx.split(self.transformer, nnx.Param, ...)
 
@@ -595,24 +596,30 @@ class F5Pipeline:
     c_ts = timesteps[:-1]
     p_ts = timesteps[1:]
 
-    p_run_inference = partial(
-        run_inference,
-        latents=latents,
-        cond=step_cond,
-        decoder_segment_ids=mask.astype(np.int32),
-        text_embed_cond=text_embed_cond,
-        text_embed_uncond=text_embed_uncond,
-        c_ts=c_ts,
-        p_ts=p_ts,
-    )
+    # p_run_inference = partial(
+    #     run_inference,
+
+    #     decoder_segment_ids=mask.astype(np.int32),
+    #     text_embed_cond=text_embed_cond,
+    #     text_embed_uncond=text_embed_uncond,
+    #     c_ts=c_ts,
+    #     p_ts=p_ts,
+    # )
     max_logging.log(f"f5_pipeline misc prep time: {time.time() - s}")
 
     s = time.time()
     with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      mel_output = p_run_inference(
+      mel_output = run_inference(
           graphdef=graphdef,
           sharded_state=state,
-          rest_of_state=rest_of_state
+          rest_of_state=rest_of_state,
+          latents=latents,
+          cond=step_cond,
+          decoder_segment_ids=mask,
+          text_embed_cond=text_embed_cond,
+          text_embed_uncond=text_embed_uncond,
+          c_ts=c_ts,
+          p_ts=p_ts,  
       )
     #mel_output.block_until_ready()
     max_logging.log(f"f5_pipeline p_run_inference time: {time.time() - s}")
