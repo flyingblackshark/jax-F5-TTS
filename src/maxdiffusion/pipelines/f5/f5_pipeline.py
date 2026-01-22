@@ -630,43 +630,70 @@ class F5Pipeline:
     max_logging.log(f"f5_pipeline vocos_vocoder time: {time.time() - s}")
     return audio
 
-@jax.jit
-def loop_body(
-    step,
-    args,
+@partial(jax.jit, static_argnames=("do_classifier_free_guidance", "guidance_scale"))
+def transformer_forward_pass(
     graphdef,
     sharded_state,
     rest_of_state,
-    cond,
-    decoder_segment_ids,
+    latents,
+    timestep,
     text_embed_cond,
     text_embed_uncond,
+    cond,
+    decoder_segment_ids,
+    do_classifier_free_guidance,
+    guidance_scale,
 ):
-    f5_transformer = nnx.merge(graphdef, sharded_state, rest_of_state)
-    latents,  c_ts, p_ts = args
-    latents_dtype = latents.dtype
-    t_curr = c_ts[step]
-    t_prev = p_ts[step]
-    t_vec = jnp.full((latents.shape[0],), t_curr, dtype=latents.dtype)
-    pred = f5_transformer(
-        x=latents,
-        cond=cond,
-        decoder_segment_ids=decoder_segment_ids,
-        text_embed=text_embed_cond,
-        timestep=t_vec,
-    )
-    null_pred = f5_transformer(
-        x=latents,
-        cond=jnp.zeros_like(cond),
-        decoder_segment_ids=decoder_segment_ids,
-        text_embed=text_embed_uncond,
-        timestep=t_vec,
-    )
-    cfg_strength = 2
-    pred = pred + (pred - null_pred) * cfg_strength
-    latents = latents + (t_prev - t_curr) * pred
-    latents = jnp.array(latents, dtype=latents_dtype)
-    return latents, c_ts, p_ts
+  f5_transformer = nnx.merge(graphdef, sharded_state, rest_of_state)
+  # F5 forward pass logic (two passes for CFG)
+  # Note: F5 code was: pred = model(cond) ... null_pred = model(uncond)
+  # But Wan usually batches them.
+  # "Like Wan" implies transformer_forward_pass takes (latents + duplicated) and returns split if needed?
+  # Or just mimics the function signature.
+  # Let's keep the F5 logic (running twice) but encapsulated here.
+  # Wait, Wan batches it: jnp.concatenate([latents] * 2).
+  # If we want to strictly follow Wan structure, we should batch.
+  # But F5Transformer2DModel might not expect batched cond if it's not set up for it (e.g. cond_mask padding).
+  # Existing F5 logic:
+  # pred = f5_transformer(..., text_embed=text_embed_cond, cond=cond)
+  # null_pred = f5_transformer(..., text_embed=text_embed_uncond, cond=zeros_like(cond))
+  
+  # To batch, we would need to concat latents, cond, text_embed.
+  # Let's try batching if dimensions align, or keep sequential if safer.
+  # Wan does: noise_pred = transformer(...); split; mix.
+  # Let's use batching for efficiency if possible, or sequential if we want to be safe.
+  # The User said "like wan_pipeline... transformer_forward_pass".
+  # I'll implement sequential calls inside this function to match the original logic but exposed as one "forward_pass"
+  # OR I can concat. Concat is better for TPU.
+  # Let's Concat.
+  
+  if do_classifier_free_guidance:
+      latents_input = jnp.concatenate([latents, latents], axis=0)
+      timestep_input = jnp.concatenate([timestep, timestep], axis=0)
+      text_embed_input = jnp.concatenate([text_embed_cond, text_embed_uncond], axis=0)
+      cond_input = jnp.concatenate([cond, jnp.zeros_like(cond)], axis=0)
+      decoder_segment_ids_input = jnp.concatenate([decoder_segment_ids, decoder_segment_ids], axis=0)
+  else:
+      latents_input = latents
+      timestep_input = timestep
+      text_embed_input = text_embed_cond
+      cond_input = cond
+      decoder_segment_ids_input = decoder_segment_ids
+
+  noise_pred = f5_transformer(
+      x=latents_input,
+      cond=cond_input,
+      decoder_segment_ids=decoder_segment_ids_input,
+      text_embed=text_embed_input,
+      timestep=timestep_input,
+  )
+
+  if do_classifier_free_guidance:
+      bsz = latents.shape[0]
+      pred, null_pred = jnp.split(noise_pred, 2, axis=0)
+      noise_pred = pred + (pred - null_pred) * guidance_scale
+      
+  return noise_pred, latents
 
 def run_inference(
     graphdef,
@@ -680,19 +707,32 @@ def run_inference(
     c_ts,
     p_ts,
 ):
+    guidance_scale = 2.0 # Hardcoded in original loop_body
+    do_classifier_free_guidance = True
 
-    loop_body_p = partial(
-        loop_body,
-        graphdef=graphdef,
-        sharded_state=sharded_state,
-        rest_of_state=rest_of_state,
-        cond=cond,
-        decoder_segment_ids=decoder_segment_ids,
-        text_embed_cond=text_embed_cond,
-        text_embed_uncond=text_embed_uncond,
-    )
-    latents, _, _ = jax.lax.fori_loop(
-        0, len(c_ts), loop_body_p, (latents, c_ts, p_ts)
-    )
-
+    # Python loop like WanPipeline
+    for step in range(len(c_ts)):
+        t_curr = c_ts[step]
+        t_prev = p_ts[step]
+        t_vec = jnp.full((latents.shape[0],), t_curr, dtype=latents.dtype)
+        
+        # transformer_forward_pass expects broadcasted timestep
+        # In Wan: timestep = jnp.broadcast_to(t, latents.shape[0])
+        
+        pred, _ = transformer_forward_pass(
+            graphdef,
+            sharded_state,
+            rest_of_state,
+            latents,
+            t_vec,
+            text_embed_cond,
+            text_embed_uncond,
+            cond,
+            decoder_segment_ids,
+            do_classifier_free_guidance,
+            guidance_scale,
+        )
+        
+        latents = latents + (t_prev - t_curr) * pred
+        
     return latents
