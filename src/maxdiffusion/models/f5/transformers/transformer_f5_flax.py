@@ -757,8 +757,6 @@ class F5Transformer2DModel(nnx.Module):
         text_embed,  # text
         timestep,  # time step
         decoder_segment_ids,  # mask
-        # text_decoder_segment_ids,#text mask
-        # drop_audio_cond:bool = False,
         deterministic: bool = True,
         rngs: nnx.Rngs = None,
     ):
@@ -771,20 +769,11 @@ class F5Transformer2DModel(nnx.Module):
                 cond,
                 text_embed,
                 decoder_segment_ids=decoder_segment_ids,
-                # drop_audio_cond=drop_audio_cond
             )
             * decoder_segment_ids[..., jnp.newaxis]
         )
         image_rotary_emb = self.rotary_embed.forward_from_seq_len(seq_len)
-        # image_rotary_emb = nn.with_logical_constraint(image_rotary_emb, ("activation_batch", "activation_embed"))
 
-        # for block in self.transformer_blocks:
-        #   x = block(
-        #       x=x,
-        #       temb=t,
-        #       image_rotary_emb=image_rotary_emb,
-        #       decoder_segment_ids=decoder_segment_ids,
-        #   )
         def scan_fn(carry, block):
             hidden_states_carry, rngs_carry = carry
             hidden_states = block(

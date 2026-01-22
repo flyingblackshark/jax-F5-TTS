@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import List, Union, Optional
+import time
 from functools import partial
 import numpy as np
 import jax
@@ -526,7 +527,9 @@ class F5Pipeline:
       duration: Union[int,List[int]] = None,
       max_sequence_length: int = 512,
   ):
+    s = time.time()
     cond,ref_audio_len = self.get_ref_mel(reference_audio, max_sequence_length)
+    max_logging.log(f"f5_pipeline get_ref_mel time: {time.time() - s}")
 
     # 2. Define call parameters
     if prompt is not None and isinstance(prompt, str):
@@ -536,18 +539,23 @@ class F5Pipeline:
 
     batch_size = len(prompt)
 
+    s = time.time()
     text_embed_cond,text_embed_uncond = self.encode_prompt(
         prompt=prompt,
         max_sequence_length=max_sequence_length,
     )
+    max_logging.log(f"f5_pipeline encode_prompt time: {time.time() - s}")
 
+    s = time.time()
     latents = self.prepare_latents(
         batch_size=batch_size,
         max_sequence_length=max_sequence_length,
         dtype=jnp.float32,
         rng=jax.random.key(self.config.seed),
     )
+    max_logging.log(f"f5_pipeline prepare_latents time: {time.time() - s}")
 
+    s = time.time()
     mask = lens_to_mask(duration, length=max_sequence_length)
     cond_mask = lens_to_mask(ref_audio_len, length=max_sequence_length)
     cond_mask = np.pad(
@@ -563,11 +571,12 @@ class F5Pipeline:
     step_cond = np.where(cond_mask[..., np.newaxis], cond, np.zeros_like(cond))
 
 
-    data_sharding = NamedSharding(self.mesh, P())
+    #data_sharding = NamedSharding(self.mesh, P())
     # Using global_batch_size_to_train_on so not to create more config variables
     # if self.config.global_batch_size_to_train_on // self.config.per_device_batch_size == 0:
-    #   data_sharding = NamedSharding(self.mesh, P(*self.config.data_sharding))
-
+    data_sharding = NamedSharding(self.mesh, P(*self.config.data_sharding))
+    latents = jax.device_put(latents, data_sharding)
+    step_cond = jax.device_put(step_cond, data_sharding)
     text_embed_cond = jax.device_put(text_embed_cond, data_sharding)
     text_embed_uncond = jax.device_put(text_embed_uncond, data_sharding)
 
@@ -596,15 +605,22 @@ class F5Pipeline:
         c_ts=c_ts,
         p_ts=p_ts,
     )
+    max_logging.log(f"f5_pipeline misc prep time: {time.time() - s}")
 
+    s = time.time()
     with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       mel_output = p_run_inference(
           graphdef=graphdef,
           sharded_state=state,
           rest_of_state=rest_of_state
       )
+    #mel_output.block_until_ready()
+    max_logging.log(f"f5_pipeline p_run_inference time: {time.time() - s}")
+
+    s = time.time()
     mel_output = jnp.where(cond_mask[..., jnp.newaxis], cond, mel_output)
     audio = self.vocos_vocoder(mel_output)
+    max_logging.log(f"f5_pipeline vocos_vocoder time: {time.time() - s}")
     return audio
 
 @jax.jit
