@@ -50,8 +50,8 @@ class AdaLayerNormContinuous(nnx.Module):
             dtype=dtype,
             param_dtype=weights_dtype,
             precision=self.precision,
-            kernel_init=nnx.with_logical_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
-            bias_init=nnx.with_logical_partitioning(nnx.initializers.zeros, ("mlp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("mlp")),
             rngs=rngs,
         )
 
@@ -110,8 +110,8 @@ class AdaLayerNormZero(nnx.Module):
             use_bias=bias,
             dtype=dtype,
             param_dtype=weights_dtype,
-            kernel_init=nnx.with_logical_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
-            bias_init=nnx.with_logical_partitioning(nnx.initializers.zeros, ("mlp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("embed", "mlp")),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("mlp")),
             precision=self.precision,
             rngs=rngs,
         )
