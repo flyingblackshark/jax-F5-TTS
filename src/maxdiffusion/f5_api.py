@@ -238,6 +238,10 @@ async def generate(request: GenerateRequest):
 
         estimated_gen_frames = max(0, estimated_gen_frames)
         duration_frames = ref_audio_len_frames + estimated_gen_frames
+        
+        if duration_frames > MAX_SEQUENCE_LENGTH:
+             raise HTTPException(status_code=400, detail=f"Audio too long. Total frames: {duration_frames} > Max: {MAX_SEQUENCE_LENGTH}")
+
         duration_frames = min(MAX_SEQUENCE_LENGTH, duration_frames)
         duration_frames = max(ref_audio_len_frames + 1, duration_frames)
 
