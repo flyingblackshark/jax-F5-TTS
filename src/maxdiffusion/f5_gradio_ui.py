@@ -9,7 +9,6 @@ import jax
 from maxdiffusion.utils.pinyin_utils import chunk_text
 import flax
 # --- Configuration & Constants ---
-cfg_strength = 2.0 # Made this a variable, potentially could be a Gradio slider
 TARGET_SR = 24000
 MAX_INFERENCE_STEPS = 100 # Default inference steps, could be Gradio input
 DEFAULT_REF_TEXT = "and there are so many things about humankind that is bad and evil. I strongly believe that love is one of the only things we have in this world."
@@ -20,27 +19,21 @@ MAX_CHUNKS = 64
 # --- JAX/Model Setup (Global Scope for Gradio) ---
 # These will be initialized once when the script starts
 global_config = None
-global_max_sequence_length = 2048
-#global_max_sequence_length = None # Will be set during setup
+
 # --- Core Diffusion Loop Logic (Unchanged) ---
 
 def generate_audio(
     ref_text: str,
     gen_text: str,
     ref_audio_input: Tuple[int, np.ndarray] | str | None,
-    num_inference_steps: int = 50,
-    guidance_scale: float = 2.0,
-    speed_factor: float = 1.0, # <-- Add speed factor parameter
-    use_sway_sampling: bool = False, # <-- Add sway sampling parameter
+    speed_factor: float = 1.0,
 ) -> Tuple[int, np.ndarray]:
     """
     Main function called by Gradio interface.
     """
-    global cfg_strength
-    cfg_strength = guidance_scale # Update global cfg strength from Gradio input
 
     t_start_total = time.time()
-    max_logging.log(f"Starting audio generation... Steps: {num_inference_steps}, CFG: {guidance_scale}, Speed: {speed_factor}, Sway: {use_sway_sampling}")
+    max_logging.log(f"Starting audio generation... Speed: {speed_factor}")
 
     # --- Input Validation and Loading ---
     if not ref_text:
@@ -90,9 +83,9 @@ def generate_audio(
     # Add a buffer (e.g., 20%) to handle faster speech or estimation errors
     chars_per_sec_ref = len(ref_text.encode("utf-8")) / ref_duration_sec
     # Estimate max duration for generated chunks based on available sequence length
-    max_gen_duration_sec = global_max_sequence_length * 256 / TARGET_SR - ref_duration_sec
+    max_gen_duration_sec = global_config.max_sequence_length * 256 / TARGET_SR - ref_duration_sec
     if max_gen_duration_sec <= 0:
-        raise gr.Error(f"Reference audio duration ({ref_duration_sec:.1f}s) exceeds max allowed duration ({global_max_sequence_length * 256 / TARGET_SR}s).")
+        raise gr.Error(f"Reference audio duration ({ref_duration_sec:.1f}s) exceeds max allowed duration ({global_config.max_sequence_length * 256 / TARGET_SR}s).")
 
     # Estimate max characters per chunk, ensuring it's positive
     # Use a slightly higher estimate chars_per_sec to be conservative
@@ -127,7 +120,7 @@ def generate_audio(
     ref_audio_len_frames = ref_audio.shape[-1] // hop_length + 1
 
     # Limit reference audio / text to avoid exceeding max sequence length early
-    max_ref_frames = int(global_max_sequence_length * 0.6) # Allow ref max 60% of total length
+    max_ref_frames = int(global_config.max_sequence_length * 0.6) # Allow ref max 60% of total length
     if ref_audio_len_frames > max_ref_frames:
         max_logging.log(f"Warning: Truncating reference audio from {ref_audio_len_frames} to {max_ref_frames} frames.")
         ref_audio_len_frames = max_ref_frames
@@ -141,8 +134,8 @@ def generate_audio(
         max_logging.log(f"Truncated reference text length: {len(ref_text)}")
 
 
-    if ref_audio_len_frames >= global_max_sequence_length:
-         raise gr.Error(f"Reference audio ({ref_audio_len_frames} frames) already exceeds max sequence length ({global_max_sequence_length}). Please use shorter audio.")
+    if ref_audio_len_frames >= global_config.max_sequence_length:
+         raise gr.Error(f"Reference audio ({ref_audio_len_frames} frames) already exceeds max sequence length ({global_config.max_sequence_length}). Please use shorter audio.")
 
     for i, single_gen_text in enumerate(gen_text_batches):
         text_combined = ref_text + single_gen_text
@@ -164,7 +157,7 @@ def generate_audio(
         # Total duration: ref + estimated gen
         duration_frames = ref_audio_len_frames + estimated_gen_frames
         # Clamp duration to max sequence length
-        duration_frames = min(global_max_sequence_length, duration_frames)
+        duration_frames = min(global_config.max_sequence_length, duration_frames)
         # Ensure duration is at least the length of the reference audio part
         duration_frames = max(ref_audio_len_frames + 1, duration_frames) # Need at least one frame for generation
 
@@ -175,14 +168,14 @@ def generate_audio(
     if padded_items_count > 0:
         for _ in range(padded_items_count):
             batched_text_list_combined.append(ref_text)
-            batched_duration_frames.append(min(global_max_sequence_length, ref_audio_len_frames + 1))
+            batched_duration_frames.append(min(global_config.max_sequence_length, ref_audio_len_frames + 1))
         max_logging.log(f"Added {padded_items_count} padded items for device alignment (total batch {len(batched_text_list_combined)}).")
 
     audio_out_jax = global_f5_pipeline(
         prompt=batched_text_list_combined,
         reference_audio=[ref_audio for _ in range(len(batched_text_list_combined))],
         duration=batched_duration_frames,
-        max_sequence_length=global_max_sequence_length,
+        max_sequence_length=global_config.max_sequence_length,
     )
     
 
@@ -275,14 +268,7 @@ def main(argv: Sequence[str]) -> None:
                 ref_text_input = gr.Textbox(label="Reference Text", info="Text corresponding to the reference audio.", value=DEFAULT_REF_TEXT, lines=3)
                 ref_audio_input = gr.Audio(label="Reference Audio", type="numpy",value="https://github.com/flyingblackshark/jax-F5-TTS/raw/refs/heads/main/test.mp3")
                 gen_text_input = gr.Textbox(label="Text to Generate", info="The text you want the model to speak.", lines=5)
-                with gr.Row():
-                    steps_slider = gr.Slider(minimum=5, maximum=MAX_INFERENCE_STEPS, value=20, step=1, label="Inference Steps", info="More steps take longer but may improve quality.")
-                    cfg_slider = gr.Slider(minimum=1.0, maximum=10.0, value=2.0, step=0.1, label="Guidance Scale (CFG)", info="Higher values follow prompts more strictly but can reduce diversity.")
-                with gr.Row():
-                    speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
-                    # === Add Sway Sampling Switch ===
-                    sway_sampling_switch = gr.Checkbox(label="Enable Sway Sampling", value=True, info="Modifies timestep schedule (requires sway_sampling_coef > 0 in config).")
-                    # ==============================
+                speed_slider = gr.Slider(minimum=0.5, maximum=1.5, value=0.7, step=0.05, label="Speed Factor", info="Adjust speech rate (1.0 = reference speed).")
                 submit_btn = gr.Button("Generate Audio", variant="primary")
 
             with gr.Column(scale=1): # Make right column narrower
@@ -291,7 +277,7 @@ def main(argv: Sequence[str]) -> None:
         # Update button click inputs list order
         submit_btn.click(
             fn=generate_audio,
-            inputs=[ref_text_input, gen_text_input, ref_audio_input, steps_slider, cfg_slider, speed_slider, sway_sampling_switch],
+            inputs=[ref_text_input, gen_text_input, ref_audio_input, speed_slider],
             outputs=[audio_output],
         )
 

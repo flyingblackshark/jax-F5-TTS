@@ -40,7 +40,10 @@
             "console": "integratedTerminal",
             "args": [
                 "src/maxdiffusion/configs/f5.yml"
-            ]
+            ],
+            "env": {
+                "JAX_COMPILATION_CACHE_DIR": "/dev/shm/jit_cache"
+            }
         },
         {
             "name": "Test F5 Gradio",
@@ -50,7 +53,10 @@
             "console": "integratedTerminal",
             "args": [
                 "src/maxdiffusion/configs/f5.yml"
-            ]
+            ],
+            "env": {
+                "JAX_COMPILATION_CACHE_DIR": "/dev/shm/jit_cache"
+            }
         },
         {
             "name": "Make F5 Mock Dataset",
