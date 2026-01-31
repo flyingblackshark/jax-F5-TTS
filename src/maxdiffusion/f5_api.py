@@ -37,6 +37,11 @@ except ImportError:
     from maxdiffusion.utils.pinyin_utils import chunk_text
 
 
+def _timing_enabled() -> bool:
+    value = os.environ.get("F5_SHOW_TIMING", "").strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
 # --- Global State ---
 zmq_context = None
 zmq_socket = None
@@ -113,10 +118,11 @@ async def generate(request: GenerateRequest):
     if ref_duration_sec < 0.1:
          raise HTTPException(status_code=400, detail="Reference audio too short < 0.1s")
 
-    # Match f5_api.py logic for Chunking
-    # We need global_max_sequence_length, let's hardcode to 2048 to match server default or fetch it? 
-    # For now match the constant in original file.
-    MAX_SEQUENCE_LENGTH = 2048 
+    # Match server max_sequence_length (overrideable via env var for the combined launcher).
+    try:
+        MAX_SEQUENCE_LENGTH = int(os.environ.get("F5_MAX_SEQUENCE_LENGTH", "2048"))
+    except ValueError:
+        MAX_SEQUENCE_LENGTH = 2048
     
     gen_text = request.text
     ref_text = request.ref_text
@@ -289,7 +295,11 @@ async def generate(request: GenerateRequest):
     audio_b64 = base64.b64encode(buffer_io.getvalue()).decode('utf-8')
 
     t3 = time.time()
-    print(f"Preprocessing: {t1-t0:.4f}s, Inference: {t2-t1:.4f}s, Postprocessing: {t3-t2:.4f}s, Total: {t3-t0:.4f}s")
+    if _timing_enabled():
+        print(
+            f"Preprocessing: {t1-t0:.4f}s, Inference: {t2-t1:.4f}s, "
+            f"Postprocessing: {t3-t2:.4f}s, Total: {t3-t0:.4f}s"
+        )
 
     return GenerateResponse(audio_base64=audio_b64)
 

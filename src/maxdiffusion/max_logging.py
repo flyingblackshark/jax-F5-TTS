@@ -16,6 +16,23 @@
 
 """Stub for logging utilities. Right now just meant to avoid raw prints"""
 
+import os
+
 
 def log(user_str):
   print(user_str, flush=True)
+
+
+def _env_truthy(name: str) -> bool:
+  value = os.environ.get(name, "").strip().lower()
+  return value in {"1", "true", "yes", "y", "on"}
+
+
+def timing_enabled() -> bool:
+  # Default: disabled.
+  return _env_truthy("F5_SHOW_TIMING") or _env_truthy("MAXDIFFUSION_SHOW_TIMING")
+
+
+def log_timing(user_str):
+  if timing_enabled():
+    log(user_str)

@@ -62,7 +62,8 @@ def main():
             
     except requests.exceptions.ConnectionError:
         print(f"Could not connect to {API_URL}. Is the server running?")
-        print("Run: uvicorn src.maxdiffusion.f5_api:app --host 0.0.0.0 --port 8000")
+        print("Run: python -m src.maxdiffusion.f5_start_api_and_serving")
+        print("Or (API only): uvicorn src.maxdiffusion.f5_api:app --host 0.0.0.0 --port 8000")
     except Exception as e:
         print(f"An error occurred: {e}")
         if 'response' in locals():

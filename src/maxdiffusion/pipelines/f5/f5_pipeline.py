@@ -529,7 +529,7 @@ class F5Pipeline:
   ):
     s = time.time()
     cond,ref_audio_len = self.get_ref_mel(reference_audio, max_sequence_length)
-    max_logging.log(f"f5_pipeline get_ref_mel time: {time.time() - s}")
+    max_logging.log_timing(f"f5_pipeline get_ref_mel time: {time.time() - s}")
 
     # 2. Define call parameters
     if prompt is not None and isinstance(prompt, str):
@@ -544,7 +544,7 @@ class F5Pipeline:
         prompt=prompt,
         max_sequence_length=max_sequence_length,
     )
-    max_logging.log(f"f5_pipeline encode_prompt time: {time.time() - s}")
+    max_logging.log_timing(f"f5_pipeline encode_prompt time: {time.time() - s}")
 
     s = time.time()
     latents = self.prepare_latents(
@@ -553,7 +553,7 @@ class F5Pipeline:
         dtype=jnp.float32,
         rng=jax.random.key(self.config.seed),
     )
-    max_logging.log(f"f5_pipeline prepare_latents time: {time.time() - s}")
+    max_logging.log_timing(f"f5_pipeline prepare_latents time: {time.time() - s}")
 
     s = time.time()
     mask = lens_to_mask(duration, length=max_sequence_length)
@@ -605,7 +605,7 @@ class F5Pipeline:
     #     c_ts=c_ts,
     #     p_ts=p_ts,
     # )
-    max_logging.log(f"f5_pipeline misc prep time: {time.time() - s}")
+    max_logging.log_timing(f"f5_pipeline misc prep time: {time.time() - s}")
 
     s = time.time()
     with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -622,12 +622,12 @@ class F5Pipeline:
           p_ts=p_ts,  
       )
     #mel_output.block_until_ready()
-    max_logging.log(f"f5_pipeline p_run_inference time: {time.time() - s}")
+    max_logging.log_timing(f"f5_pipeline p_run_inference time: {time.time() - s}")
 
     s = time.time()
     mel_output = jnp.where(cond_mask[..., jnp.newaxis], cond, mel_output)
     audio = self.vocos_vocoder(mel_output)
-    max_logging.log(f"f5_pipeline vocos_vocoder time: {time.time() - s}")
+    max_logging.log_timing(f"f5_pipeline vocos_vocoder time: {time.time() - s}")
     return audio
 
 @partial(jax.jit, static_argnames=("do_classifier_free_guidance", "guidance_scale"))
